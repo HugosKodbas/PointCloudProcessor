@@ -93,6 +93,9 @@ def main():
     parser.add_argument("--make_z_up", action="store_true", help="Rotate +90° around X (Y-up -> Z-up)")
     parser.add_argument("--align_xy", action="store_true", help="Rotate around Z to align dominant direction with X-axis")
 
+    # ROR filter
+    parser.add_argument("--filter_ror", action="store_true", help="Run radius outlier removal (KDTree-based)")
+
     # DBSCAN blob removal
     parser.add_argument("--dbscan", action="store_true", help="Run DBSCAN and keep largest cluster(s)")
     parser.add_argument("--dbscan_eps", type=float, default=0.25, help="DBSCAN eps in meters (cluster radius)")
@@ -163,18 +166,20 @@ def main():
         colors = None
 
     # ---- Radius Outlier Removal (your KDTree step) ----
-    KDtree = spatial.KDTree(xyz, leafsize=MIN_NEIGHBORS)
-    to_keep = np.zeros(xyz.shape[0], dtype=bool)
+    if args.filter_ror:
+        print("Applying radius outlier removal...")
+        KDtree = spatial.KDTree(xyz, leafsize=MIN_NEIGHBORS)
+        to_keep = np.zeros(xyz.shape[0], dtype=bool)
 
-    for idx, point in enumerate(xyz):
-        indices = KDtree.query_ball_point(point, r=RADIUS_THRESHOLD)
-        if len(indices) >= MIN_NEIGHBORS:
-            to_keep[idx] = True
+        for idx, point in enumerate(xyz):
+            indices = KDtree.query_ball_point(point, r=RADIUS_THRESHOLD)
+            if len(indices) >= MIN_NEIGHBORS:
+                to_keep[idx] = True
 
-    xyz_filtered = xyz[to_keep]
-    colors_filtered = colors[to_keep] if colors is not None else None
+        xyz_filtered = xyz[to_keep]
+        colors_filtered = colors[to_keep] if colors is not None else None
 
-    print(f"Radius filter kept {xyz_filtered.shape[0]}/{xyz.shape[0]} points ({100*xyz_filtered.shape[0]/xyz.shape[0]:.2f}%)")
+        print(f"Radius filter kept {xyz_filtered.shape[0]}/{xyz.shape[0]} points ({100*xyz_filtered.shape[0]/xyz.shape[0]:.2f}%)")
 
     # ---- DBSCAN Keep Largest Blob(s) ----
     if args.dbscan:
