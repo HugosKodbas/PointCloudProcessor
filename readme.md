@@ -13,3 +13,19 @@ The above command downloads raw scan from google drive, rotates it around X-axis
 ```
 python ply_to_npy_db.py <GOOGLE_DRIVE_LINK>>  Office_db_noZ  --downsample_voxel 0.02 --dbscan --dbscan_eps 0.25 --dbscan_min_points 30 --align_xy
 ```
+
+# Pre-processor
+
+Preprocesses point cloud. Does the following (currently):
+- Converts .ply to .npy which is required for PointNeXt
+- Rotates point cloud around X-axis in order to make Z-axis point up. Also required for the model, since that is the "gravity dimension"
+- Filters the cloud to remove outliers and clusters:
+    - Radius-Outlier-Removal (for isolated outliers)
+    - DBSCAN (for big clusters or blobs)
+- Rotates around Z-axis in order to align walls with XY. Doesn't work very well, since custom scans can still have outliers which affect the eigenvectors.
+
+# Post-processor
+
+Responsible for generating the actual floor plans from model-processed point clouds. 
+
+*WIP*
