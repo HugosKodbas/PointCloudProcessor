@@ -203,6 +203,14 @@ def main():
         print("Aligning point cloud to dominant XY direction...")
         xyz_tmp = xyz_filtered.astype(np.float64)
 
+        bbox = np.column_stack([xyz_tmp.min(axis=0), xyz_tmp.max(axis=0)])
+        center = bbox.mean(axis=1)
+
+        # Diagnostics
+        print(f"Rotation center: X={center[0]:.2f}, Y={center[1]:.2f}, Z={center[2]:.2f}")
+        print(f"Room extents: X=[{xyz_tmp[:,0].min():.2f}, {xyz_tmp[:,0].max():.2f}]")
+        print(f"Room extents: Y=[{xyz_tmp[:,1].min():.2f}, {xyz_tmp[:,1].max():.2f}]")
+
         # Build a yaw-estimation subset (focus on "wall band")
         z = xyz_tmp[:, 2]
         zmin, zmax = float(z.min()), float(z.max())
@@ -214,8 +222,9 @@ def main():
         yaw_before = estimate_yaw_pca_xy(xyz_for_yaw)
 
         # Rotate whole cloud around its centroid
-        center = xyz_tmp.mean(axis=0)
-        Rz = rot_z_rad(-yaw_before)
+        # Use bounding box center, not mean
+        
+        Rz = rot_z_rad(3*np.pi/2) # <= JUST LEAVE THIS HERE
         xyz_rot = (xyz_tmp - center) @ Rz.T + center
 
         # Measure yaw again on the same rule (same "wall band") AFTER rotation
