@@ -34,7 +34,7 @@ def normalize_angle(a, b):
     return theta
 
 # We only want to fit lines that are horizontal or vertical, manhattan world assumption.
-def line_angle(p1, p2, max_angle=0.5):
+def line_angle(p1, p2, max_angle=0.25):
     """Calculate angle of line p1p2 in radians."""
     a = p1[0] - p2[0] # Delta x
     b = p1[1] - p2[1] # Delta y
@@ -51,7 +51,7 @@ def line_angle(p1, p2, max_angle=0.5):
 
 def distance_to_line(a, b, c, x0, y0):
     """Calculate the distance from a point to a line ax+by+c=0"""
-    return abs(a * x0 + b * y0 + c) / math.hypot(a, b)
+    return np.abs(a * x0 + b * y0 + c) / math.hypot(a, b)
 
 def line_length(p1, p2):
     # Length of a line given two points is: sqrt ((X_2 - X_1)^2 + (Y_2 - Y_1)^2)
@@ -87,6 +87,7 @@ def ransac_line_fitting(wx, wy, max_iterations, threshold, min_inliers):
         # Find one model.
 
         iterations_per_model = max_iterations
+        available_points_list = list(available_points)
         
         while iterations_per_model > 0:
 
@@ -95,7 +96,6 @@ def ransac_line_fitting(wx, wy, max_iterations, threshold, min_inliers):
                 break
 
             # Randomly sample 2 points to define a line.            
-            available_points_list = list(available_points)
             sample_indices = random.sample(range(len(available_points_list)), 2)
 
             p1_idx = available_points_list[sample_indices[0]]
@@ -124,11 +124,15 @@ def ransac_line_fitting(wx, wy, max_iterations, threshold, min_inliers):
             available_xy = xy_matrix[available_points_list]
             point_to_line_distance = distance_to_line(a, b, c, available_xy[:, 0], available_xy[:, 1])
             #print(f"Point to line distance: {point_to_line_distance}")
-            for local_idx, dist in enumerate(point_to_line_distance):
+            """ for local_idx, dist in enumerate(point_to_line_distance):
                 if dist < threshold:
                     #print(f"Found inlier with distance: {dist} and index: {indx}")
                     original_inx = available_points_list[local_idx]
-                    tempInliers.append(original_inx)
+                    tempInliers.append(original_inx) """
+
+            inlier_mask = point_to_line_distance < threshold
+            inlier_local_indices = np.where(inlier_mask)[0]
+            tempInliers = [available_points_list[i] for i in inlier_local_indices]
 
             #print(tempInliers)
         
@@ -169,7 +173,7 @@ def plot(points, walls):
     """Utility to plot points for debugging."""
 
     plt.figure(figsize=(8, 8))
-    plt.scatter(points[:, 0], points[:, 1], s=1, c="gray",alpha=0.5)
+    plt.scatter(points[:, 0], points[:, 1], s=1, c="#72a5d1",alpha=0.5)
     plt.axis("equal")
     plt.title("Wall Points + Detected Walls")
     colors = plt.cm.tab10(np.linspace(0, 1, len(walls)))
@@ -177,10 +181,14 @@ def plot(points, walls):
         p1, p2 = wall['endpoints']
         plt.plot([p1[0], p2[0]], [p1[1], p2[1]],
                  color = colors[i], linewidth=3,
-                 label=f"Wall {i+1} {wall['num_inliers']} pts)")
-    plt.xlabel("X")
-    plt.ylabel("Y")
-    plt.legend()
+                 label=f"Wall {i+1} {wall['num_inliers']} pts)",
+                 zorder=10,
+                 linestyle='--')
+    plt.xlabel("X (m)")
+    plt.ylabel("Y (m)")
+    plt.legend(loc="best", fontsize=10)
+    plt.grid(True, alpha=0.2, linestyle='--', color='#cccccc')
+    plt.tight_layout()
     plt.show()
 
 # Read x,y from CSV
@@ -205,7 +213,7 @@ def main():
     # Apply RANSAC line fitting to points 
     walls = ransac_line_fitting(wx, # Wall x coordinates
                         wy, # Wall y coordinates
-                        max_iterations=1000,
+                        max_iterations=500,
                         threshold=0.05,
                         min_inliers=2250)
     print(f'Detected {len(walls)} wall(s).')
