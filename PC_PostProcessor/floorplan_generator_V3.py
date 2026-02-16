@@ -3,6 +3,22 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import random
+def calculate_centroid(wx, wy):
+    '''Function that calculates the median of all points, should result in a point that lies within the room, which will help us remove some lines'''
+    x_mean, y_mean = np.mean(wx), np.mean(wy)
+
+    return (x_mean, y_mean)
+    
+def distance_to_centroid(line, centroid):
+    x_centroid = centroid[0]
+    y_centroid = centroid[1]
+    a, b, c = line
+
+    # Distance is given by
+    return abs(a*x_centroid + b*y_centroid + c) / (math.hypot(a, b))
+
+def remove_parallel_walls(parallel_walls):
+    pass
 
 def normalize_coefficients(a, b, c):
     s = math.hypot(a, b)
@@ -28,7 +44,7 @@ def distance_between_parallel_lines(L1, L2):
     p0y = -b1 * c1
 
     d = abs(a2*p0x + b2*p0y + c2)
-    print(d)
+    #print(d)
     return d
 
 def angle_between_lines(theta1, theta2):
@@ -41,7 +57,6 @@ def detect_parallel_lines(walls, distance_threshold, angle_threshold):
     ''' Takes models (a, b, c) as input and investigates if they are parallel within a distance and angle threshold, 
     and collapses into one line in such cases. Lines within 15 cm (0.15m) should be merged.'''
 
-    eps = 1e-12
     angle_threshold_radians = math.radians(angle_threshold) 
 
     model_angles = []
@@ -64,11 +79,13 @@ def detect_parallel_lines(walls, distance_threshold, angle_threshold):
             distance = distance_between_parallel_lines(model_angles[i]['model'], model_angles[j]['model'])
             if distance <= distance_threshold:
                 count += 1
+                walls[i]['is_parallel'] = True
+                walls[j]['is_parallel'] = True
                 parallell_line_pairs.append((model_angles[i]['model'], model_angles[j]['model']))
 
     print(f"RAAAAHHH {count} {parallell_line_pairs}")
 
-    return parallell_line_pairs
+    return walls
 
 # Calculate endpoints
 def calculate_endpoints(inlier_points):
@@ -184,12 +201,15 @@ def ransac_line_fitting(wx, wy, max_iterations, threshold, min_inliers):
             a = float(y_2 - y_1)
             b = float(x_1 - x_2)
             c = float((x_2 * y_1) - (x_1 * y_2))
-            
-
-            print(f"Coefficients (a, b, c) before normalization: {a, b, c}\n")
 
             # Normalize coefficients, which make distance/angle calculations behave correctly further in the program.
-            (a, b, c) = normalize_coefficients(a, b, c)
+            normalized = normalize_coefficients(a, b, c)
+
+            if normalized is None:
+                iterations_per_model -= 1
+                continue
+
+            (a, b, c) = normalized
             #print(f"Coefficients (a,b,c) after normalization: {a, b, c}")
 
             tempInliers = []
@@ -197,11 +217,6 @@ def ransac_line_fitting(wx, wy, max_iterations, threshold, min_inliers):
             available_xy = xy_matrix[available_points_list]
             point_to_line_distance = distance_to_line(a, b, c, available_xy[:, 0], available_xy[:, 1])
             #print(f"Point to line distance: {point_to_line_distance}")
-            """ for local_idx, dist in enumerate(point_to_line_distance):
-                if dist < threshold:
-                    #print(f"Found inlier with distance: {dist} and index: {indx}")
-                    original_inx = available_points_list[local_idx]
-                    tempInliers.append(original_inx) """
 
             inlier_mask = point_to_line_distance < threshold
             inlier_local_indices = np.where(inlier_mask)[0]
@@ -231,22 +246,27 @@ def ransac_line_fitting(wx, wy, max_iterations, threshold, min_inliers):
         'model': best_model,
         'inliers': best_inlier_indices,
         'endpoints': (p1, p2),
-        'num_inliers': best_count})
+        'num_inliers': best_count,
+        'is_parallel': False}) # False initially...
 
         # Remove the inliers from available points
         available_points -= set(best_inlier_indices)
         #print(f"Model {len(models)} added. Removed {best_count} inliers. {len(available_points)} points remaining.")
+
+    # Parallell Lines check
+    models = detect_parallel_lines(models, 0.25, 0.5)
 
     return models if models else None
  # Get the inlier points.
     
 
 # Plotting utilities for debugging
-def plot(points, walls):
+def plot(points, walls, centroid):
     """Utility to plot points for debugging."""
 
     plt.figure(figsize=(8, 8))
     plt.scatter(points[:, 0], points[:, 1], s=1, c="#72a5d1",alpha=0.5)
+    plt.scatter(centroid[0], centroid[1], c="red", label="Room Centroid")
     plt.axis("equal")
     plt.title("Wall Points + Detected Walls")
     colors = plt.cm.tab10(np.linspace(0, 1, len(walls)))
@@ -291,10 +311,15 @@ def main():
                         min_inliers=2250)
     #print(f'Detected {len(walls)} wall(s). {walls[0]["model"]}')
 
-    detect_parallel_lines(walls, 0.25, 0.5)
+    #detect_parallel_lines(walls, 0.25, 0.5)
+    for wall in range(len(walls)):
+        print(f"Wall: {walls[wall]['model']} is parallel {walls[wall]['is_parallel']}")
+
+    centroid = calculate_centroid(wx, wy)
+    print(centroid)
 
     # DEBUGGING
-    plot(np.column_stack((wx, wy)), walls)
+    plot(np.column_stack((wx, wy)), walls, centroid)
 
 if __name__ == "__main__":
     main()
