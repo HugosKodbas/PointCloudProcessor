@@ -4,6 +4,72 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import random
 
+def normalize_coefficients(a, b, c):
+    s = math.hypot(a, b)
+    eps = 1e-8 # Some small numer near zero
+    if s < eps:
+        return None
+    a = a / s
+    b = b / s
+    c = c / s
+
+    # Flip the sign
+    if c < 0:
+        a, b, c = -a, -b, -c
+    return (a, b, c)
+
+def distance_between_parallel_lines(L1, L2):
+    ''' L1, L2 on form ax + bx + c = 0 '''
+    # Distance between normalized lines from any point on L1, L2
+    (a1, b1, c1) = L1
+    (a2, b2, c2) = L2
+
+    p0x = -a1 * c1
+    p0y = -b1 * c1
+
+    d = abs(a2*p0x + b2*p0y + c2)
+    print(d)
+    return d
+
+def angle_between_lines(theta1, theta2):
+    '''Helper function for detect_parallel_lines, if angle between two lines is 0, they are parallel.'''
+    d = abs(theta1 - theta2)
+    return min(d, math.pi - d)
+
+
+def detect_parallel_lines(walls, distance_threshold, angle_threshold):
+    ''' Takes models (a, b, c) as input and investigates if they are parallel within a distance and angle threshold, 
+    and collapses into one line in such cases. Lines within 15 cm (0.15m) should be merged.'''
+
+    eps = 1e-12
+    angle_threshold_radians = math.radians(angle_threshold) 
+
+    model_angles = []
+    for wall in range(len(walls)):
+        angle = normalize_angle(walls[wall]['model'][0], walls[wall]['model'][1])
+        model_angles.append({'model': walls[wall]['model'],
+                           'angle': angle})
+    
+    parallell_line_pairs = []
+    count = 0
+    for i in range(len(model_angles)):
+        for j in range(i+1, len(model_angles)):
+
+            # Check for parallelness
+            dtheta = angle_between_lines(model_angles[i]['angle'], model_angles[j]['angle'])
+            if dtheta > angle_threshold_radians:
+                continue
+
+            # Distance check
+            distance = distance_between_parallel_lines(model_angles[i]['model'], model_angles[j]['model'])
+            if distance <= distance_threshold:
+                count += 1
+                parallell_line_pairs.append((model_angles[i]['model'], model_angles[j]['model']))
+
+    print(f"RAAAAHHH {count} {parallell_line_pairs}")
+
+    return parallell_line_pairs
+
 # Calculate endpoints
 def calculate_endpoints(inlier_points):
     x_min_idx = np.argmin(inlier_points[:, 0])
@@ -118,6 +184,13 @@ def ransac_line_fitting(wx, wy, max_iterations, threshold, min_inliers):
             a = float(y_2 - y_1)
             b = float(x_1 - x_2)
             c = float((x_2 * y_1) - (x_1 * y_2))
+            
+
+            print(f"Coefficients (a, b, c) before normalization: {a, b, c}\n")
+
+            # Normalize coefficients, which make distance/angle calculations behave correctly further in the program.
+            (a, b, c) = normalize_coefficients(a, b, c)
+            #print(f"Coefficients (a,b,c) after normalization: {a, b, c}")
 
             tempInliers = []
             # Measure distance from all points to the line, and find inliers
@@ -216,7 +289,9 @@ def main():
                         max_iterations=500,
                         threshold=0.05,
                         min_inliers=2250)
-    print(f'Detected {len(walls)} wall(s).')
+    #print(f'Detected {len(walls)} wall(s). {walls[0]["model"]}')
+
+    detect_parallel_lines(walls, 0.25, 0.5)
 
     # DEBUGGING
     plot(np.column_stack((wx, wy)), walls)
