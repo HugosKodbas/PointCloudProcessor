@@ -61,12 +61,40 @@ def detect_parallel_lines(walls, distance_threshold, angle_threshold):
 
     model_angles = []
     for wall in range(len(walls)):
-        angle = normalize_angle(walls[wall]['model'][0], walls[wall]['model'][1])
-        model_angles.append({'model': walls[wall]['model'],
-                           'angle': angle})
+        angle = normalize_angle(walls[wall]['model'][0], walls[wall]['model'][1]) # Angle of the wall segment. Used for comparison later.
+        model_angles.append({
+            'idx': wall, # We save the index in case of unexpected shuffling. 
+            'wall_id': walls[wall]['wall_id'],
+            'model': walls[wall]['model'],
+            'angle': angle
+        })
     
-    parallell_line_pairs = []
-    count = 0
+    # Disjoint-Set-Union. We want to organize parallel walls into groups.
+    parent = {w['wall_id']: w['wall_id'] for w in model_angles}
+    rank = {w['wall_id']: 0 for w in model_angles}
+    
+    # Simple helpers specific to this function... we can get away with placing them here.
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    
+    def union(x, y):
+        rx, ry = find(x), find(y)
+        if rx == ry:
+            return
+        if rank[rx] < rank[ry]:
+            parent[rx] = ry
+        elif rank[rx] > rank[ry]:
+            parent[ry] = rx
+        else:
+            parent[ry] = rx
+            rank[rx] += 1
+
+
+    parallel_pairs = []
+
     for i in range(len(model_angles)):
         for j in range(i+1, len(model_angles)):
 
@@ -78,14 +106,30 @@ def detect_parallel_lines(walls, distance_threshold, angle_threshold):
             # Distance check
             distance = distance_between_parallel_lines(model_angles[i]['model'], model_angles[j]['model'])
             if distance <= distance_threshold:
-                count += 1
-                walls[i]['is_parallel'] = True
-                walls[j]['is_parallel'] = True
-                parallell_line_pairs.append((model_angles[i]['model'], model_angles[j]['model']))
+                wi = model_angles[i]['wall_id']
+                wj = model_angles[j]['wall_id']
 
-    print(f"RAAAAHHH {count} {parallell_line_pairs}")
+                parallel_pairs.append((wi, wj, distance, dtheta))
 
-    return walls
+                union(wi, wj)
+
+                walls[model_angles[i]['idx']]['is_parallel'] = True
+                walls[model_angles[j]['idx']]['is_parallel'] = True
+
+                #parallel_pairs.append((model_angles[i]['model'], model_angles[j]['model']))
+    
+    groups_dict = {}
+    for w in model_angles:
+        root = find(w['wall_id'])
+        groups_dict.setdefault(root, set()).add(w['wall_id'])
+
+    # Group size is minimum 2
+    parallel_groups = [g for g in groups_dict.values() if len(g) >= 2]
+
+    print("Parallel pairs (wall_id_i, wall_id_j, distance, dtheta):", parallel_pairs)
+    print("Parallel groups:", parallel_groups)
+
+    return walls, parallel_pairs, parallel_groups
 
 # Calculate endpoints
 def calculate_endpoints(inlier_points):
@@ -161,6 +205,8 @@ def ransac_line_fitting(wx, wy, max_iterations, threshold, min_inliers):
     available_points = set(range(len(xy_matrix)))
 
     models = []
+
+    wall_id = 0
 
     # Find ALL models.
     while len(available_points) >= min_inliers:
@@ -241,22 +287,26 @@ def ransac_line_fitting(wx, wy, max_iterations, threshold, min_inliers):
 
         # Calculate endpoints
         p1, p2 = calculate_endpoints(xy_matrix[best_inlier_indices])
-        
+
         models.append({
+        'wall_id': wall_id,
         'model': best_model,
         'inliers': best_inlier_indices,
         'endpoints': (p1, p2),
         'num_inliers': best_count,
         'is_parallel': False}) # False initially...
 
+        # Increment the wall_id variable
+        wall_id += 1
+
         # Remove the inliers from available points
         available_points -= set(best_inlier_indices)
         #print(f"Model {len(models)} added. Removed {best_count} inliers. {len(available_points)} points remaining.")
 
     # Parallell Lines check
-    models = detect_parallel_lines(models, 0.25, 0.5)
+    models, parallel_pairs, parallel_groups = detect_parallel_lines(models, 0.25, 0.5)
 
-    return models if models else None
+    return models, parallel_pairs, parallel_groups 
  # Get the inlier points.
     
 
@@ -274,7 +324,7 @@ def plot(points, walls, centroid):
         p1, p2 = wall['endpoints']
         plt.plot([p1[0], p2[0]], [p1[1], p2[1]],
                  color = colors[i], linewidth=3,
-                 label=f"Wall {i+1} {wall['num_inliers']} pts)",
+                 label=f"Wall {wall['wall_id']} {wall['num_inliers']} pts)",
                  zorder=10,
                  linestyle='--')
     plt.xlabel("X (m)")
@@ -304,16 +354,18 @@ def main():
     print(f"Loaded X: {wx[::-10]}, Y: {wy[::-10]}")
 
     # Apply RANSAC line fitting to points 
-    walls = ransac_line_fitting(wx, # Wall x coordinates
+    walls, parallel_pairs, parallel_groups = ransac_line_fitting(wx, # Wall x coordinates
                         wy, # Wall y coordinates
                         max_iterations=500,
                         threshold=0.05,
                         min_inliers=2250)
     #print(f'Detected {len(walls)} wall(s). {walls[0]["model"]}')
 
+    print(f"Groups of parallel segments: {parallel_groups}")
+
     #detect_parallel_lines(walls, 0.25, 0.5)
     for wall in range(len(walls)):
-        print(f"Wall: {walls[wall]['model']} is parallel {walls[wall]['is_parallel']}")
+        print(f"Wall: {walls[wall]['wall_id']} is parallel {walls[wall]['is_parallel']}")
 
     centroid = calculate_centroid(wx, wy)
     print(centroid)
