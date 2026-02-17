@@ -190,7 +190,7 @@ def normalize_angle(a, b):
     return theta
 
 # We only want to fit lines that are horizontal or vertical, manhattan world assumption.
-def line_angle(p1, p2, max_angle=0.25):
+def line_angle(p1, p2, max_angle=0.05):
     """Calculate angle of line p1p2 in radians."""
     a = p1[0] - p2[0] # Delta x
     b = p1[1] - p2[1] # Delta y
@@ -213,7 +213,7 @@ def line_length(p1, p2):
     # Length of a line given two points is: sqrt ((X_2 - X_1)^2 + (Y_2 - Y_1)^2)
     return math.hypot((p2[0] - p1[0]), (p2[1] - p1[1]))
 
-def ransac_line_fitting(wx, wy, max_iterations, threshold, min_inliers):
+def ransac_line_fitting(wx, wy, max_iterations, threshold, min_inliers, angle_threshold):
     '''
     Docstring for ransac_line_fitting of 2 dimensional data (lines)
     
@@ -222,6 +222,7 @@ def ransac_line_fitting(wx, wy, max_iterations, threshold, min_inliers):
     :param max_iterations: How many iterations we try, more iterations mean a higher probability of finding a good model. 
     :param threshold: Distance threshold to determine if a point is an inlier to the line model, on the centimeter scale.
     :param min_inliers: The number of close inliers required to assert that the line model is a good fit.
+    :param angle_threshold: Maximum angle threshold, beyond which lines are not considered. Meant to enforce walls that are vertical and horizontal.
 
     returns a list of dictionaries:
     'model': (a, b, c) coefficients of the line ax + by + c = 0
@@ -261,7 +262,7 @@ def ransac_line_fitting(wx, wy, max_iterations, threshold, min_inliers):
 
             #print(f"Sampled points: {xy_matrix[p1][0]}, {xy_matrix[p1][1]} and {xy_matrix[p2][0]}, {xy_matrix[p2][1]}")
             # We only want to fit lines that are horizontal or vertical, according to manhattan world assumption
-            if  not line_angle(xy_matrix[p1_idx], xy_matrix[p2_idx]):
+            if  not line_angle(xy_matrix[p1_idx], xy_matrix[p2_idx], angle_threshold):
                 iterations_per_model -= 1
                 #print("Rejected line due to angle constraint.")
                 continue
@@ -388,8 +389,9 @@ def main():
     walls, parallel_pairs, parallel_groups = ransac_line_fitting(wx, # Wall x coordinates
                         wy, # Wall y coordinates
                         max_iterations=500,
-                        threshold=0.05,
-                        min_inliers=1250)
+                        threshold=0.01,
+                        min_inliers=2250,
+                        angle_threshold=0.25)
     #print(f'Detected {len(walls)} wall(s). {walls[0]["model"]}')
 
     print(f"Groups of parallel segments: {parallel_groups}")
