@@ -17,8 +17,37 @@ def distance_to_centroid(line, centroid):
     # Distance is given by
     return abs(a*x_centroid + b*y_centroid + c) / (math.hypot(a, b))
 
-def remove_parallel_walls(parallel_walls):
-    pass
+# Transparent surfaces (windows, glass doors etc) and other architecture can cause duplicate surfaces that are interpreted as walls. 
+# Option A: Choose the segment with the most amount of inliers, as it is likely this is the wall. More realisticly placed walls, but might cause trouble with
+# shorter wall clusters not getting discovered.
+# Option B: Always take the wall closest to the room centroid, might give a clearner look but will not be as dimensionally accurate.
+def remove_parallel_walls(models, parallel_groups):
+
+    if not parallel_groups:
+        return models
+
+    # Flatten all wall_ids that belong to parallel groups
+    parallel_ids = {wid for group in parallel_groups for wid in group}
+
+    cleaned_walls = [
+        w for w in models
+        if w['wall_id'] not in parallel_ids
+    ]
+
+    # For each group, keep only the walls with the most number of inliers (since model is very confident that this is the actual wall.)
+    for group in parallel_groups:
+        group_models = [
+            w for w in models
+            if w['wall_id'] in group
+        ]
+        if not group_models:
+            continue
+        
+        strongest = max(group_models, key=lambda w: w['num_inliers'])
+
+        cleaned_walls.append(strongest)
+
+    return cleaned_walls
 
 def normalize_coefficients(a, b, c):
     s = math.hypot(a, b)
@@ -306,6 +335,8 @@ def ransac_line_fitting(wx, wy, max_iterations, threshold, min_inliers):
     # Parallell Lines check
     models, parallel_pairs, parallel_groups = detect_parallel_lines(models, 0.25, 0.5)
 
+    models = remove_parallel_walls(models, parallel_groups)
+
     return models, parallel_pairs, parallel_groups 
  # Get the inlier points.
     
@@ -358,7 +389,7 @@ def main():
                         wy, # Wall y coordinates
                         max_iterations=500,
                         threshold=0.05,
-                        min_inliers=2250)
+                        min_inliers=1250)
     #print(f'Detected {len(walls)} wall(s). {walls[0]["model"]}')
 
     print(f"Groups of parallel segments: {parallel_groups}")
@@ -368,7 +399,6 @@ def main():
         print(f"Wall: {walls[wall]['wall_id']} is parallel {walls[wall]['is_parallel']}")
 
     centroid = calculate_centroid(wx, wy)
-    print(centroid)
 
     # DEBUGGING
     plot(np.column_stack((wx, wy)), walls, centroid)
