@@ -3,6 +3,150 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import random
+
+
+# ###
+# GAP DETECTION
+# #################################################################################################################
+
+def split_walls_by_gaps(models, xy_matrix, gap_treshold):
+    # Walk through each wall model and check for gaps in the inlier points. If a gap is found, split the wall into two segments.
+    '''
+    Split a wall whose inlier points are clustered in separate patches, i.e contains a gap somewhere.
+
+    Parameters
+    ---
+    models    : dict with keys 'model', 'inliers', 'wall_id', 'num_inliers', 'endpoints', 'is_parallel'
+    xy_matrix : (N, 2) numpy array of all wall points (x,y)
+    gap_threshold : float, distancce in meters that defines a gap. If the detected gap is greater than this threshold, we split the wall into two segments.
+                    this should remove most floating wall segments.
+    
+    
+    Returns
+    ---
+    A list of wall dicts. If no gap is found the list contains the original wall, unchanged.
+    
+    
+    '''
+
+    inlier_idx = models['inliers']
+    inlier_pts = xy_matrix[inlier_idx]
+
+    a, b, _ = models['model']
+
+    direction = np.array([-b, a], dtype=np.float64) # Direction vector of the line, perpendicular to the normal vector (a,b)
+
+    # Scalar projection of eacch inlier onto the line direction
+    proj = inlier_pts @ direction
+    order = np.argsort(proj)
+    sorted_proj = proj[order]
+
+    gaps = np.diff(sorted_proj)
+    gap_mask = gaps > gap_treshold
+
+    if not np.any(gap_mask):
+        return [models]
+
+    # Build segments
+    split_after = np.where(gap_mask)[0]
+    starts = np.concatenate(([0], split_after + 1))
+    ends = np.concatenate((split_after, [len(order)]))
+
+    segments = []
+
+    for s, e in zip(starts, ends):
+        seg_order = order[s:e]
+        if len(seg_order) < 2:
+            continue
+        seg_global = [inlier_idx[i] for i in seg_order]
+        p1, p2 = calculate_endpoints(xy_matrix[seg_global])
+        segments.append({
+            'wall_id': models['wall_id'], # We can keep the same wall_id for
+            'model': models['model'], # The line model is the same for both segments, since they lie on the same line.
+            'inliers': seg_global,
+            'endpoints': (p1, p2),
+            'num_inliers': len(seg_global),
+            'is_parallel': models['is_parallel']
+        })
+
+    return segments
+
+def apply_gap_detection(models, xy_matrix, gap_treshold):
+    new_models = []
+    for wall in models:
+        new_models.extend(split_walls_by_gaps(wall, xy_matrix, gap_treshold))
+
+    # Re-assign wall_ids so they are contiguous from 0
+    for new_id, w in enumerate(new_models):
+        w['wall_id'] = new_id
+
+    return new_models
+
+
+# ###
+# INTERSECTION + CORNER EXTENSION
+# ###
+
+def line_intersection_point(model1, model2):
+    '''
+    Intersection of lines given in ax + by + c = 0 form. Returns None if lines are parallel.
+    '''
+
+    a1, b1, c1 = model1
+    a2, b2, c2 = model2
+
+    det = a1 * b2 - a2 * b1
+    if abs(det) < 1e-10:
+        return None
+    
+    # Apply cramers rule
+    x = (-c1 * b2 + c2 * b1) / det
+    y = (-a1 * c2 + a2 * c1) / det
+
+    return np.array([x, y], dtype=np.float64)
+
+def _snap_endpoint(ep, pt, max_extension):
+    '''
+    Snap an endpoint to a point, if the distance is less than max_extension.
+    '''
+    if np.linalg.norm(ep - pt) < max_extension:
+        return pt
+    return ep
+
+
+def extend_wall_to_intersection(walls, max_extension=0.35):
+    '''
+    Extend a wall segment to a corner point, if the endpoint is within max_extension distance from the corner point.
+    '''
+    eps = [[np.array(wall['endpoints'][0], dtype=np.float64),
+            np.array(wall['endpoints'][1], dtype=np.float64)]
+            for wall in walls]
+    
+    n = len(walls)
+    for i in range(n):
+        for j in range(i + 1, n):
+            pt = line_intersection_point(walls[i]['model'], walls[j]['model'])
+            if pt is None:
+                continue
+
+            for ei in range(2):
+                dist_i = np.linalg.norm(eps[i][ei] - pt)
+                if dist_i > max_extension:
+                    continue
+                for ej in range(2):
+                    dist_j = np.linalg.norm(eps[j][ej] - pt)
+                    if dist_j > max_extension:
+                        continue
+
+                    # If both endpoints are within max_extension, we can snap them to the corner point.
+                    eps[i][ei] = pt.copy()
+                    eps[j][ej] = pt.copy()
+
+    for i, w in enumerate(walls):
+        w['endpoints'] = (eps[i][0], eps[i][1])
+    
+    return walls
+
 def calculate_centroid(wx, wy):
     '''Function that calculates the median of all points, should result in a point that lies within the room, which will help us remove some lines'''
     x_mean, y_mean = np.mean(wx), np.mean(wy)
@@ -155,7 +299,7 @@ def detect_parallel_lines(walls, distance_threshold, angle_threshold):
     # Group size is minimum 2
     parallel_groups = [g for g in groups_dict.values() if len(g) >= 2]
 
-    print("Parallel pairs (wall_id_i, wall_id_j, distance, dtheta):", parallel_pairs)
+    #print("Parallel pairs (wall_id_i, wall_id_j, distance, dtheta):", parallel_pairs)
     print("Parallel groups:", parallel_groups)
 
     return walls, parallel_pairs, parallel_groups
@@ -312,7 +456,7 @@ def ransac_line_fitting(wx, wy, max_iterations, threshold, min_inliers, angle_th
             
         
         if best_model is None or best_count < min_inliers:
-            print(f"Failed to find a model with sufficient inliers. Best count: {best_count}")
+            #print(f"Failed to find a model with sufficient inliers. Best count: {best_count}")
             break
 
         # Calculate endpoints
@@ -333,10 +477,31 @@ def ransac_line_fitting(wx, wy, max_iterations, threshold, min_inliers, angle_th
         available_points -= set(best_inlier_indices)
         #print(f"Model {len(models)} added. Removed {best_count} inliers. {len(available_points)} points remaining.")
 
-    # Parallell Lines check
-    models, parallel_pairs, parallel_groups = detect_parallel_lines(models, 0.25, 0.5)
+    # Clean up artifacts:
+    """ eps = 1e-6
+    models = [
+        w for w in models
+        if np.linalg.norm(
+            np.array(w['endpoints'][0]) - np.array(w['endpoints'][1])
+        ) > eps
+    ] """
 
+    # Parallell Lines check
+    models, parallel_pairs, parallel_groups = detect_parallel_lines(models, 0.25, 0.5) # Default: 0.25, 0.5
+
+    # Remove parallel lines
     models = remove_parallel_walls(models, parallel_groups)
+
+    # Now detect gaps.
+    # Split walls iwhose inlier points are seperarated by a gap > 15 cm
+    # along the line direction so that we get two segments.
+    models = apply_gap_detection(models, xy_matrix, gap_treshold=0.10)
+
+    # Extend walls to intersection point.
+    models = extend_wall_to_intersection(models, max_extension=0.62)
+
+    # Join co-linear walls that are close to each other, and have endpoints that are close to each other. This should help with holes in the wall segments.
+    #models = join_collinear_walls(models, separation_threshold=0.3)
 
     return models, parallel_pairs, parallel_groups 
  # Get the inlier points.
@@ -389,8 +554,8 @@ def main():
     walls, parallel_pairs, parallel_groups = ransac_line_fitting(wx, # Wall x coordinates
                         wy, # Wall y coordinates
                         max_iterations=500,
-                        threshold=0.01,
-                        min_inliers=2250,
+                        threshold=0.025,
+                        min_inliers=2000,
                         angle_threshold=0.25)
     #print(f'Detected {len(walls)} wall(s). {walls[0]["model"]}')
 
@@ -401,6 +566,11 @@ def main():
         print(f"Wall: {walls[wall]['wall_id']} is parallel {walls[wall]['is_parallel']}")
 
     centroid = calculate_centroid(wx, wy)
+
+    for w in walls:
+        p1, p2 = w["endpoints"]
+        L = np.linalg.norm(np.array(p2) - np.array(p1))
+        print(w["wall_id"], w["num_inliers"], L)
 
     # DEBUGGING
     plot(np.column_stack((wx, wy)), walls, centroid)
