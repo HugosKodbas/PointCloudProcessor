@@ -4,11 +4,111 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import random
 
+def closest_endpoint_pair_between_segments(wall1, wall2):
+    """
+    Find the closest endpoint-to-endpoint pair between two segments.
 
+    Parameters
+    ----------
+    endpoints_a : tuple/list of 2 points
+        (p1, p2) where each point is (x, y) or array-like.
+    endpoints_b : tuple/list of 2 points
+        (q1, q2)
+
+    Returns
+    -------
+    best_pair : dict
+        {
+          "a_index": 0 or 1,
+          "b_index": 0 or 1,
+          "p": np.ndarray shape (2,),
+          "q": np.ndarray shape (2,),
+          "distance": float
+        }
+    """
+
+    p1 = np.asarray(wall1['endpoints'][0], dtype=np.float64)
+    p2 = np.asarray(wall1['endpoints'][1], dtype=np.float64)
+    q1 = np.asarray(wall2['endpoints'][0], dtype=np.float64)
+    q2 = np.asarray(wall2['endpoints'][1], dtype=np.float64)
+
+    PAIR_P = [p1, p2]
+    PAIR_Q = [q1, q2]
+
+    closest_pair = None
+    for x1, y1 in enumerate(PAIR_P):
+        for x2, y2 in enumerate(PAIR_Q):
+            dist = np.linalg.norm(y1 - y2)
+            if closest_pair is None or dist < closest_pair["distance"]:
+                closest_pair = {
+                    "model1": wall1['original_id'],
+                    "model2": wall2['original_id'],
+                    "a_index": x1,
+                    "b_index": x2,
+                    "p": y1,
+                    "q": y2,
+                    "distance": dist
+                }
+    return closest_pair
+
+def is_parallel(model1, model2, angle_threshold=0.05):
+    '''Helper function for detect_parallel_lines, checks if two lines are parallel within an angle threshold.'''
+    a1, b1, _ = model1
+    a2, b2, _ = model2
+
+    theta1 = normalize_angle(a1, b1)
+    theta2 = normalize_angle(a2, b2)
+
+    dtheta = angle_between_lines(theta1, theta2)
+
+    return dtheta <= angle_threshold
+
+def line_from_points(p, q, eps=1e-12):
+    p = np.asarray(p, dtype=np.float64)
+    q = np.asarray(q, dtype=np.float64)
+    x1, y1 = float(p[0]), float(p[1])
+    x2, y2 = float(q[0]), float(q[1])
+
+    a = y1 - y2
+    b = x2 - x1
+    c = x1*y2 - x2*y1
+
+    n = np.hypot(a, b)
+    if n < eps:
+        return None
+    a, b, c = a/n, b/n, c/n
+
+    # optional: consistent sign
+    if a < 0 or (abs(a) < eps and b < 0):
+        a, b, c = -a, -b, -c
+
+    return (a, b, c)
+
+# Co-linear Wall Bridging
+def bridge_collinear_walls(walls, separation_threshold):
+    n = len(walls)
+
+    new_models = walls.copy() # Start with original walls, we will add new bridged walls to this list.
+    for w1 in range(n):
+        for w2 in range(w1 + 1, n):
+            if is_parallel(walls[w1]['model'], walls[w2]['model']):
+                pair = closest_endpoint_pair_between_segments(walls[w1], walls[w2])
+                if pair['distance'] <= separation_threshold:
+                    a, b, c = line_from_points(pair['p'], pair['q'])
+                    model = (a, b, c)
+                    new_models.append({
+                        'original_id': f"{len(walls)+1}",
+                        'wall_id': f"{len(walls)+1}",
+                        'model': model,
+                        'inliers': [],
+                        'endpoints': (pair['p'], pair['q']),
+                        'num_inliers': 0,
+                        'is_parallel': False
+                    })
+    return new_models
 # ###
 # GAP DETECTION
 # #################################################################################################################
-
 def split_walls_by_gaps(models, xy_matrix, gap_treshold):
     # Walk through each wall model and check for gaps in the inlier points. If a gap is found, split the wall into two segments.
     '''
@@ -35,7 +135,7 @@ def split_walls_by_gaps(models, xy_matrix, gap_treshold):
     a, b, _ = models['model']
 
     direction = np.array([-b, a], dtype=np.float64) # Direction vector of the line, perpendicular to the normal vector (a,b)
-
+    direction = direction / (np.linalg.norm(direction) + 1e-12)
     # Scalar projection of eacch inlier onto the line direction
     proj = inlier_pts @ direction
     order = np.argsort(proj)
@@ -50,17 +150,25 @@ def split_walls_by_gaps(models, xy_matrix, gap_treshold):
     # Build segments
     split_after = np.where(gap_mask)[0]
     starts = np.concatenate(([0], split_after + 1))
-    ends = np.concatenate((split_after, [len(order)]))
+    ends = np.concatenate((split_after + 1, [len(order)]))
 
     segments = []
 
     for s, e in zip(starts, ends):
         seg_order = order[s:e]
-        if len(seg_order) < 2:
+        # Segments with less than 800 inliers are considered junk.
+        if len(seg_order) < 120:
             continue
         seg_global = [inlier_idx[i] for i in seg_order]
         p1, p2 = calculate_endpoints(xy_matrix[seg_global])
+        print(f"Splitting wall {models['original_id']} into segment with {len(seg_global)} inliers, endpoints {p1}, {p2}")
+        L = line_length(p1, p2)
+        print(f"Segment length: {L:.2f}m")
+        if L < 0.8:
+            print(f"Discarding segment {models['original_id']} with length {L:.2f}m, which is below the 8cm threshold.")
+            continue
         segments.append({
+            'original_id': models['original_id'], # We can keep the same original_id for all segments, since they come from the same original wall.
             'wall_id': models['wall_id'], # We can keep the same wall_id for
             'model': models['model'], # The line model is the same for both segments, since they lie on the same line.
             'inliers': seg_global,
@@ -105,47 +213,135 @@ def line_intersection_point(model1, model2):
 
     return np.array([x, y], dtype=np.float64)
 
-def _snap_endpoint(ep, pt, max_extension):
-    '''
-    Snap an endpoint to a point, if the distance is less than max_extension.
-    '''
-    if np.linalg.norm(ep - pt) < max_extension:
-        return pt
-    return ep
+def extend_wall_to_intersection(
+    walls,
+    max_extension,
+    endpoint_guard=0.10,   # meters: if an endpoint is already this close to another endpoint, don't move it
+    ignore_same_wall=True  # ignore comparing endpoint to other endpoint in same wall
+):
+    """
+    Extend/snap wall endpoints to pairwise line intersections, but only if:
+      1) endpoint is within max_extension of the intersection, and
+      2) endpoint is NOT already very close to some other wall endpoint (endpoint_guard).
 
+    Parameters
+    ----------
+    walls : list[dict]
+        Each dict has keys: 'model' (line params), 'endpoints' ((x,y),(x,y)), etc.
+    max_extension : float
+        Maximum allowed distance from endpoint to intersection to snap.
+    endpoint_guard : float
+        If an endpoint is already within this distance of another wall endpoint, we do not move it.
+    ignore_same_wall : bool
+        If True, do not treat the other endpoint of the same wall as "another wall endpoint".
+    """
 
-def extend_wall_to_intersection(walls, max_extension=0.35):
+    n = len(walls)
+
+    # Original endpoints (used for distance tests)
+    orig = [[np.array(wall['endpoints'][0], dtype=np.float64),
+             np.array(wall['endpoints'][1], dtype=np.float64)]
+            for wall in walls]
+    
+    orig_id = [w.get("original_id", w.get("wall_id", i)) for i, w in enumerate(walls)]
+
+    # Mutable endpoints we will write into
+    new_ep = [[orig[i][0].copy(), orig[i][1].copy()] for i in range(n)]
+
+    # Flatten all endpoints for "already connected?" tests
+    # entries: (wall_index, endpoint_index, point_array)
+    all_endpoints = [(wi, ei, orig[wi][ei]) for wi in range(n) for ei in range(2)]
+
+    def endpoint_is_already_near_other_endpoint(wi, ei, pt):
+        """True if pt is within endpoint_guard of any OTHER wall endpoint."""
+        for wj, ej, q in all_endpoints:
+            if wj == wi and ej == ei:
+                continue
+            if ignore_same_wall and wj == wi:
+                continue
+            if np.linalg.norm(pt - q) <= endpoint_guard:
+                print(
+                    f"GUARD: wall orig={orig_id[wi]} (idx {wi}) ep {ei} "
+                    f"blocked by wall orig={orig_id[wj]} (idx {wj}) ep {ej}, "
+                    f"dist={np.linalg.norm(pt-q):.3f}")
+                return True
+        return False
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            pt = line_intersection_point(walls[i]['model'], walls[j]['model'])
+            if pt is None:
+                continue
+            pt = np.array(pt, dtype=np.float64)
+
+            # Wall i: nearest endpoint to pt
+            di = [np.linalg.norm(orig[i][ei] - pt) for ei in range(2)]
+            best_ei = int(np.argmin(di))
+            if di[best_ei] > max_extension:
+                continue
+
+            # Guard: don't move if already near some other endpoint
+            if endpoint_is_already_near_other_endpoint(i, best_ei, orig[i][best_ei]):
+                continue
+
+            # Wall j: nearest endpoint to pt
+            dj = [np.linalg.norm(orig[j][ej] - pt) for ej in range(2)]
+            best_ej = int(np.argmin(dj))
+            if dj[best_ej] > max_extension:
+                continue
+
+            if endpoint_is_already_near_other_endpoint(j, best_ej, orig[j][best_ej]):
+                continue
+
+            # Snap both endpoints
+            print(f"Extending wall {walls[i]['original_id']} endpoint {best_ei} and wall {walls[j]['original_id']} endpoint {best_ej} to intersection point {pt}.")
+            new_ep[i][best_ei] = pt.copy()
+            new_ep[j][best_ej] = pt.copy()
+
+    for i, w in enumerate(walls):
+        w['endpoints'] = (new_ep[i][0], new_ep[i][1])
+
+    return walls
+
+""" def extend_wall_to_intersection(walls, max_extension):
     '''
     Extend a wall segment to a corner point, if the endpoint is within max_extension distance from the corner point.
     '''
-    eps = [[np.array(wall['endpoints'][0], dtype=np.float64),
+    n = len(walls)
+    
+    orig = [[np.array(wall['endpoints'][0], dtype=np.float64),
             np.array(wall['endpoints'][1], dtype=np.float64)]
             for wall in walls]
     
-    n = len(walls)
+    new_ep = [[orig[i][0].copy(), orig[i][1].copy()] for i in range(n)]
+
     for i in range(n):
         for j in range(i + 1, n):
             pt = line_intersection_point(walls[i]['model'], walls[j]['model'])
             if pt is None:
                 continue
 
-            for ei in range(2):
-                dist_i = np.linalg.norm(eps[i][ei] - pt)
-                if dist_i > max_extension:
-                    continue
-                for ej in range(2):
-                    dist_j = np.linalg.norm(eps[j][ej] - pt)
-                    if dist_j > max_extension:
-                        continue
+            # For wall i: pick the SINGLE nearest endpoint within max_extension
+            di = [np.linalg.norm(orig[i][ei] - pt) for ei in range(2)]
+            best_ei = int(np.argmin(di))
+            if di[best_ei] > max_extension:
+                continue
 
-                    # If both endpoints are within max_extension, we can snap them to the corner point.
-                    eps[i][ei] = pt.copy()
-                    eps[j][ej] = pt.copy()
+            # For wall j: same — pick SINGLE nearest endpoint
+            dj = [np.linalg.norm(orig[j][ej] - pt) for ej in range(2)]
+            best_ej = int(np.argmin(dj))
+            if dj[best_ej] > max_extension:
+                continue
+
+            # Both walls have an endpoint close enough → snap them
+            print(f"Extending wall {walls[i]['wall_id']} endpoint {best_ei} and wall {walls[j]['wall_id']} endpoint {best_ej} to intersection point {pt}.")
+            new_ep[i][best_ei] = pt.copy()
+            new_ep[j][best_ej] = pt.copy()
 
     for i, w in enumerate(walls):
-        w['endpoints'] = (eps[i][0], eps[i][1])
-    
-    return walls
+        w['endpoints'] = (new_ep[i][0], new_ep[i][1])
+
+    return walls """
 
 def calculate_centroid(wx, wy):
     '''Function that calculates the median of all points, should result in a point that lies within the room, which will help us remove some lines'''
@@ -236,6 +432,7 @@ def detect_parallel_lines(walls, distance_threshold, angle_threshold):
     for wall in range(len(walls)):
         angle = normalize_angle(walls[wall]['model'][0], walls[wall]['model'][1]) # Angle of the wall segment. Used for comparison later.
         model_angles.append({
+            'original_id': walls[wall]['original_id'],
             'idx': wall, # We save the index in case of unexpected shuffling. 
             'wall_id': walls[wall]['wall_id'],
             'model': walls[wall]['model'],
@@ -283,6 +480,7 @@ def detect_parallel_lines(walls, distance_threshold, angle_threshold):
                 wj = model_angles[j]['wall_id']
 
                 parallel_pairs.append((wi, wj, distance, dtheta))
+                print(f"Parallel pair found: wall {model_angles[i]['original_id']} and wall {model_angles[j]['original_id']}")
 
                 union(wi, wj)
 
@@ -298,9 +496,6 @@ def detect_parallel_lines(walls, distance_threshold, angle_threshold):
 
     # Group size is minimum 2
     parallel_groups = [g for g in groups_dict.values() if len(g) >= 2]
-
-    #print("Parallel pairs (wall_id_i, wall_id_j, distance, dtheta):", parallel_pairs)
-    print("Parallel groups:", parallel_groups)
 
     return walls, parallel_pairs, parallel_groups
 
@@ -382,6 +577,8 @@ def ransac_line_fitting(wx, wy, max_iterations, threshold, min_inliers, angle_th
 
     wall_id = 0
 
+    org_id = 0 # We can use this later if we want to keep track of which original wall segment a split segment came from, for example.
+
     # Find ALL models.
     while len(available_points) >= min_inliers:
         best_inlier_indices = None
@@ -406,7 +603,7 @@ def ransac_line_fitting(wx, wy, max_iterations, threshold, min_inliers, angle_th
 
             #print(f"Sampled points: {xy_matrix[p1][0]}, {xy_matrix[p1][1]} and {xy_matrix[p2][0]}, {xy_matrix[p2][1]}")
             # We only want to fit lines that are horizontal or vertical, according to manhattan world assumption
-            if  not line_angle(xy_matrix[p1_idx], xy_matrix[p2_idx], angle_threshold):
+            if not line_angle(xy_matrix[p1_idx], xy_matrix[p2_idx], angle_threshold):
                 iterations_per_model -= 1
                 #print("Rejected line due to angle constraint.")
                 continue
@@ -463,6 +660,7 @@ def ransac_line_fitting(wx, wy, max_iterations, threshold, min_inliers, angle_th
         p1, p2 = calculate_endpoints(xy_matrix[best_inlier_indices])
 
         models.append({
+        'original_id': org_id,
         'wall_id': wall_id,
         'model': best_model,
         'inliers': best_inlier_indices,
@@ -472,19 +670,16 @@ def ransac_line_fitting(wx, wy, max_iterations, threshold, min_inliers, angle_th
 
         # Increment the wall_id variable
         wall_id += 1
+        org_id  += 1
 
         # Remove the inliers from available points
         available_points -= set(best_inlier_indices)
         #print(f"Model {len(models)} added. Removed {best_count} inliers. {len(available_points)} points remaining.")
 
     # Clean up artifacts:
-    """ eps = 1e-6
-    models = [
-        w for w in models
-        if np.linalg.norm(
-            np.array(w['endpoints'][0]) - np.array(w['endpoints'][1])
-        ) > eps
-    ] """
+    eps = 1e-6
+    
+
 
     # Parallell Lines check
     models, parallel_pairs, parallel_groups = detect_parallel_lines(models, 0.25, 0.5) # Default: 0.25, 0.5
@@ -495,13 +690,14 @@ def ransac_line_fitting(wx, wy, max_iterations, threshold, min_inliers, angle_th
     # Now detect gaps.
     # Split walls iwhose inlier points are seperarated by a gap > 15 cm
     # along the line direction so that we get two segments.
-    models = apply_gap_detection(models, xy_matrix, gap_treshold=0.10)
+    
+    models = apply_gap_detection(models, xy_matrix, gap_treshold=0.65)
 
     # Extend walls to intersection point.
     models = extend_wall_to_intersection(models, max_extension=0.62)
 
     # Join co-linear walls that are close to each other, and have endpoints that are close to each other. This should help with holes in the wall segments.
-    #models = join_collinear_walls(models, separation_threshold=0.3)
+    models = bridge_collinear_walls(models, separation_threshold=0.46)
 
     return models, parallel_pairs, parallel_groups 
  # Get the inlier points.
@@ -521,7 +717,7 @@ def plot(points, walls, centroid):
         p1, p2 = wall['endpoints']
         plt.plot([p1[0], p2[0]], [p1[1], p2[1]],
                  color = colors[i], linewidth=3,
-                 label=f"Wall {wall['wall_id']} {wall['num_inliers']} pts)",
+                 label=f"Wall {wall['original_id']} {wall['num_inliers']} pts",
                  zorder=10,
                  linestyle='--')
     plt.xlabel("X (m)")
@@ -548,30 +744,16 @@ def main():
     
     # Step 1: Load wall data.
     wx, wy = load_wall_points(wall_csv)
-    print(f"Loaded X: {wx[::-10]}, Y: {wy[::-10]}")
 
     # Apply RANSAC line fitting to points 
     walls, parallel_pairs, parallel_groups = ransac_line_fitting(wx, # Wall x coordinates
                         wy, # Wall y coordinates
                         max_iterations=500,
                         threshold=0.025,
-                        min_inliers=2000,
+                        min_inliers=1500,
                         angle_threshold=0.25)
-    #print(f'Detected {len(walls)} wall(s). {walls[0]["model"]}')
-
-    print(f"Groups of parallel segments: {parallel_groups}")
-
-    #detect_parallel_lines(walls, 0.25, 0.5)
-    for wall in range(len(walls)):
-        print(f"Wall: {walls[wall]['wall_id']} is parallel {walls[wall]['is_parallel']}")
 
     centroid = calculate_centroid(wx, wy)
-
-    for w in walls:
-        p1, p2 = w["endpoints"]
-        L = np.linalg.norm(np.array(p2) - np.array(p1))
-        print(w["wall_id"], w["num_inliers"], L)
-
     # DEBUGGING
     plot(np.column_stack((wx, wy)), walls, centroid)
 
