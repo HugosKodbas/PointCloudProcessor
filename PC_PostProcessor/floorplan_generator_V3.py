@@ -86,7 +86,7 @@ def line_from_points(p, q, eps=1e-12):
     return (a, b, c)
 
 # Co-linear Wall Bridging
-def bridge_collinear_walls(walls, separation_threshold):
+""" def bridge_collinear_walls(walls, separation_threshold):
     n = len(walls)
 
     new_models = [] # Start with original walls, we will add new bridged walls to this list.
@@ -109,7 +109,37 @@ def bridge_collinear_walls(walls, separation_threshold):
 
     walls = walls + new_models
     return walls
-# ###
+    """
+# Patched version of above function
+def bridge_collinear_walls(walls, separation_threshold):
+    n = len(walls)
+    new_models = []
+
+    for w1 in range(n):
+        for w2 in range(w1 + 1, n):
+            if is_parallel(walls[w1]['model'], walls[w2]['model']):
+                pair = closest_endpoint_pair_between_segments(walls[w1], walls[w2])
+
+                if pair['distance'] <= separation_threshold:
+                    coeffs = line_from_points(pair['p'], pair['q']) # Guard for degenerate case where endpoints are the same, which causes line_from_points to fail. This can happen when two walls are very close and their endpoints are snapped together in the intersection extension step.
+                    if coeffs is None:
+                        continue
+                    a, b, c = coeffs
+
+                    model = (a, b, c)
+                    new_models.append({
+                        'original_id': f"{len(walls)+1}",
+                        'wall_id': None,
+                        'model': model,
+                        'inliers': [],
+                        'endpoints': (pair['p'], pair['q']),
+                        'num_inliers': 0,
+                        'is_parallel': False
+                    })
+
+    return walls + new_models
+
+# ### 
 # GAP DETECTION
 # #################################################################################################################
 def split_walls_by_gaps(models, xy_matrix, gap_treshold):
@@ -168,7 +198,7 @@ def split_walls_by_gaps(models, xy_matrix, gap_treshold):
         L = line_length(p1, p2)
         print(f"Segment length: {L:.2f}m")
         if L < 0.45:
-            print(f"Discarding segment {models['original_id']} with length {L:.2f}m, which is below the 8cm threshold.")
+            print(f"Discarding segment {models['original_id']} with length {L:.2f}m, which is below the {L*100:.2f}cm threshold.")
             continue
         segments.append({
             'original_id': models['original_id'], # We can keep the same original_id for all segments, since they come from the same original wall.
@@ -1153,25 +1183,25 @@ def ransac_line_fitting(x, y, max_iterations, threshold, min_inliers, angle_thre
     parallel_groups = []
     if door_post_processing:
         # Parallell Lines check
-        models, parallel_pairs, parallel_groups = detect_parallel_lines(models, 0.25, 0.5) # Default: 0.25, 0.5
+        models, parallel_pairs, parallel_groups = detect_parallel_lines(models, 0.40, 0.5) # Default: 0.25, 0.5
         # Remove parallel lines
         models = remove_parallel_walls(models, parallel_groups)
     
     if wall_post_processing:
-        models, parallel_pairs, parallel_groups = detect_parallel_lines(models, 0.25, 0.5) # Default: 0.25, 0.5
+        models, parallel_pairs, parallel_groups = detect_parallel_lines(models, 0.40, 0.5) # Default: 0.25, 0.5
         # Remove parallel lines
         models = remove_parallel_walls(models, parallel_groups)
         # Now detect gaps.
         # Split walls iwhose inlier points are seperarated by a gap > 15 cm
         # along the line direction so that we get two segments.
         
-        models = apply_gap_detection(models, xy_matrix, gap_treshold=0.65)
+        models = apply_gap_detection(models, xy_matrix, gap_treshold=2.1)
 
         # Extend walls to intersection point.
         models = extend_wall_to_intersection(models, max_extension=0.5)
 
         # Join co-linear walls that are close to each other, and have endpoints that are close to each other. This should help with holes in the wall segments.
-        models = bridge_collinear_walls(models, separation_threshold=0.46)
+        models = bridge_collinear_walls(models, separation_threshold=0.50)
 
     return models, parallel_pairs, parallel_groups 
  
@@ -1300,9 +1330,9 @@ def load_points(csv_path: str):
 
 def main():
     # CSV Paths
-    wall_csv   = "/home/hugni/PC_Processor/PC_PostProcessor/CSV_Predictions/pred_wall_coords_cloud0.csv"
-    door_csv   = "/home/hugni/PC_Processor/PC_PostProcessor/CSV_Predictions/pred_door_coords_cloud0.csv"
-    window_csv = "/home/hugni/PC_Processor/PC_PostProcessor/CSV_Predictions/pred_window_coords_cloud0.csv"
+    wall_csv   = "/home/hugni/PC_Processor/PC_PostProcessor/CSV_Predictions/pred_wall_coords_cloud3.csv"
+    door_csv   = "/home/hugni/PC_Processor/PC_PostProcessor/CSV_Predictions/pred_door_coords_cloud3.csv"
+    window_csv = "/home/hugni/PC_Processor/PC_PostProcessor/CSV_Predictions/pred_window_coords_cloud3.csv"
 
     # Step 1: Load wall data.
     wx, wy = load_points(wall_csv)
@@ -1367,6 +1397,8 @@ def main():
     )
 
     walls = new_walls
+    #walls, _, pg = detect_parallel_lines(walls, 0.15, 0.5)
+    #walls = remove_parallel_walls(walls, pg)
     doors = snapped_doors
     windows = snapped_windows
 
