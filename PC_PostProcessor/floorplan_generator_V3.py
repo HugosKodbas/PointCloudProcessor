@@ -1,9 +1,12 @@
+import copy
 import math
+import json
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import random
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union, Sequence
 
 def closest_endpoint_pair_between_segments(wall1, wall2):
     """
@@ -111,38 +114,51 @@ def line_from_points(p, q, eps=1e-12):
     return walls
     """
 # Patched version of above function
-def bridge_collinear_walls(walls, separation_threshold):
+def bridge_collinear_walls(walls, separation_threshold, lateral_threshold=0.2, angle_threshold=0.5):
     n = len(walls)
     new_models = []
 
     for w1 in range(n):
         for w2 in range(w1 + 1, n):
-            if is_parallel(walls[w1]['model'], walls[w2]['model']):
-                pair = closest_endpoint_pair_between_segments(walls[w1], walls[w2])
+            angle_radian_threshold = math.radians(angle_threshold) # angle_threshold degree threshold for parallelness, can be tuned.
+            if not is_parallel(walls[w1]['model'], walls[w2]['model'], angle_threshold=angle_radian_threshold):
+                continue
 
-                if pair['distance'] <= separation_threshold:
-                    coeffs = line_from_points(pair['p'], pair['q']) # Guard for degenerate case where endpoints are the same, which causes line_from_points to fail. This can happen when two walls are very close and their endpoints are snapped together in the intersection extension step.
-                    if coeffs is None:
-                        continue
-                    a, b, c = coeffs
+            L1 = normalize_coefficients(*walls[w1]['model'])
+            L2 = normalize_coefficients(*walls[w2]['model'])
+            if L1 is None or L2 is None:
+                continue
+            lat_dist = distance_between_parallel_lines(L1, L2)
+            if lat_dist > lateral_threshold:
+                print(f"Rejecting Bridge: {lat_dist:.3f}m > {lateral_threshold}m for walls {walls[w1]['original_id']} and {walls[w2]['original_id']}")
+                continue
 
-                    model = (a, b, c)
-                    new_models.append({
-                        'original_id': f"{len(walls)+1}",
-                        'wall_id': None,
-                        'model': model,
-                        'inliers': [],
-                        'endpoints': (pair['p'], pair['q']),
-                        'num_inliers': 0,
-                        'is_parallel': False
-                    })
+                
+            pair = closest_endpoint_pair_between_segments(walls[w1], walls[w2])
+            if pair['distance'] > separation_threshold:
+                continue
+            coeffs = line_from_points(pair['p'], pair['q']) # Guard for degenerate case where endpoints are the same, which causes line_from_points to fail. This can happen when two walls are very close and their endpoints are snapped together in the intersection extension step.
+            if coeffs is None:
+                continue
+            a, b, c = coeffs
+
+            model = (a, b, c)
+            new_models.append({
+                'original_id': f"{len(walls)+1}",
+                'wall_id': None,
+                'model': model,
+                'inliers': [],
+                'endpoints': (pair['p'], pair['q']),
+                'num_inliers': 0,
+                'is_parallel': False
+            })
 
     return walls + new_models
 
 # ### 
 # GAP DETECTION
 # #################################################################################################################
-def split_walls_by_gaps(models, xy_matrix, gap_treshold):
+def split_walls_by_gaps(models, xy_matrix, gap_threshold):
     # Walk through each wall model and check for gaps in the inlier points. If a gap is found, split the wall into two segments.
     '''
     Split a wall whose inlier points are clustered in separate patches, i.e contains a gap somewhere.
@@ -175,7 +191,7 @@ def split_walls_by_gaps(models, xy_matrix, gap_treshold):
     sorted_proj = proj[order]
 
     gaps = np.diff(sorted_proj)
-    gap_mask = gaps > gap_treshold
+    gap_mask = gaps > gap_threshold
 
     if not np.any(gap_mask):
         return [models]
@@ -212,14 +228,16 @@ def split_walls_by_gaps(models, xy_matrix, gap_treshold):
 
     return segments
 
-def apply_gap_detection(models, xy_matrix, gap_treshold):
+def apply_gap_detection(models, xy_matrix, gap_threshold):
     new_models = []
     for wall in models:
-        new_models.extend(split_walls_by_gaps(wall, xy_matrix, gap_treshold))
+        new_models.extend(split_walls_by_gaps(wall, xy_matrix, gap_threshold))
 
     # Re-assign wall_ids so they are contiguous from 0
     for new_id, w in enumerate(new_models):
         w['wall_id'] = new_id
+
+    print(f"Gap detection: {len(models)} initial, {len(new_models)} output.")
 
     return new_models
 
@@ -621,7 +639,96 @@ def _point_to_segment_distance(p: np.ndarray, a: np.ndarray, b: np.ndarray, eps:
     proj = a + t * ab
     return float(np.linalg.norm(p - proj))
 
+def filter_window_segments(
+    windows: List[Dict[str, Any]],
+    walls: List[Dict[str, Any]],
+    max_midpoint_wall_distance: float = 0.15,
+    *,
+    use_angle: bool = True,
+    angle_threshold_deg: float = 20.0,   # hard reject above this
+    angle_weight: float = 0.05,
+    min_length: float = 0.20,            # discard very short detections
+    endpoints_key: str = "endpoints",
+    wall_id_key: str = "wall_id",
+    add_match_fields: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    Filter window segments by:
+      1. Minimum length (remove tiny RANSAC noise segments).
+      2. Midpoint proximity to a wall (removes floating windows).
+      3. Angle alignment with matched wall (removes perpendicular artefacts).
 
+    Unlike filter_door_segments, this does NOT:
+      - Apply max_endpoint_wall_distance (windows legitimately overhang wall endpoints).
+      - Enforce one window per wall (multiple panes are valid).
+    """
+    if not windows or not walls:
+        return []
+
+    wall_data = []
+    for wi, w in enumerate(walls):
+        if endpoints_key not in w:
+            continue
+        wa = _to_xy(w[endpoints_key][0])
+        wb = _to_xy(w[endpoints_key][1])
+        wid = w.get(wall_id_key, wi)
+        wdir = _seg_dir(wa, wb)
+        wall_data.append((wi, wid, wa, wb, wdir))
+
+    kept = []
+    for win in windows:
+        if endpoints_key not in win:
+            continue
+
+        p1 = _to_xy(win[endpoints_key][0])
+        p2 = _to_xy(win[endpoints_key][1])
+
+        # 1. Length filter
+        if line_length(p1, p2) < min_length:
+            print(f"  [WIN FILTER] drop: length {line_length(p1,p2):.3f}m < {min_length}m")
+            continue
+
+        mid = 0.5 * (p1 + p2)
+        wdir_win = _seg_dir(p1, p2)
+
+        # 2+3. Find best wall match
+        best = None
+        for wi, wid, wa, wb, wdir in wall_data:
+            dist_mid = _point_to_segment_distance(mid, wa, wb)
+            if use_angle:
+                ang = _angle_between_dirs(wdir_win, wdir)
+                ang_deg = ang * 180.0 / np.pi
+                if ang_deg > angle_threshold_deg:
+                    continue          # hard reject: clearly wrong orientation
+                score = dist_mid + angle_weight * ang
+            else:
+                ang_deg = 0.0
+                score = dist_mid
+
+            if best is None or score < best[0]:
+                best = (score, dist_mid, ang_deg, wi, wid)
+
+        if best is None:
+            print(f"  [WIN FILTER] drop: no wall within angle threshold")
+            continue
+
+        score, dist_mid, ang_deg, wi, wid = best
+
+        if dist_mid > max_midpoint_wall_distance:
+            print(f"  [WIN FILTER] drop: dist_mid={dist_mid:.3f}m > {max_midpoint_wall_distance}m")
+            continue
+
+        if add_match_fields:
+            win["matched_wall_id"]       = wid
+            win["matched_wall_index"]    = wi
+            win["matched_wall_distance"] = float(dist_mid)
+            win["matched_wall_angle_deg"]= float(ang_deg)
+
+        kept.append(win)
+
+    return kept
+
+# Door Filtering
 def filter_door_segments_keep_frame_opening(
     doors: List[Dict[str, Any]],
     walls: List[Dict[str, Any]],
@@ -832,7 +939,7 @@ def snap_segments_and_cut_walls(
 
     # Matching options
     use_angle: bool = True,
-    angle_threshold_deg: float = 10.0,
+    angle_threshold_deg: float = 45.0,
     angle_weight: float = 0.10,  # meters per radian
 
     # Cut / validation options
@@ -861,6 +968,9 @@ def snap_segments_and_cut_walls(
     Returns:
       new_walls, new_segments
     """
+
+    # Deep copy to prevent caller mutation
+    segments = [copy.deepcopy(s) for s in (segments or [])]
 
     def _clamp(x: float, lo: float, hi: float) -> float:
         return max(lo, min(hi, x))
@@ -910,7 +1020,9 @@ def snap_segments_and_cut_walls(
 
         best = None  # (score, dist_mid, ang_rad, ang_deg, wi, wid, wa, wb, wdir, wlen, wall_dict)
         for wi, wid, wa, wb, wdir, wlen, wdict in wall_data:
-            dist_mid = _point_to_segment_distance(mid, wa, wb)
+            # Distance to the infinite-line model, so that we can still calculate the midpoint of lines that have been split by gaps.
+            a_coef, b_coef, c_coef = wdict['model']   # already stored in the wall dict
+            dist_mid = float(abs(a_coef * mid[0] + b_coef * mid[1] + c_coef))
 
             if use_angle:
                 ang = _angle_between_dirs(sdir, wdir)  # radians, undirected
@@ -960,6 +1072,8 @@ def snap_segments_and_cut_walls(
 
         # annotate + overwrite endpoints to snapped endpoints
         if annotate_segments:
+            s['original_endpoints'] = (p1.tolist(), p2.tolist())
+            #s['snapped_endpoints'] = (sp1.tolist(), sp2.tolist())
             s["matched_wall_id"] = wid
             s["matched_wall_index"] = wi
             s["matched_wall_distance"] = float(dist_mid)
@@ -980,6 +1094,26 @@ def snap_segments_and_cut_walls(
         per_wall_cuts.setdefault(wid, []).append((float(t0), float(t3), s, sp1, sp2, meta))
         new_segments.append(s)
 
+        matched_orig_id = wdict.get('original_id')
+        if matched_orig_id is not None:
+            for _wi2, wid2, wa2, wb2, wdir2, wlen2, wdict2 in wall_data:
+                if wid2 == wid:
+                    continue
+                if wdict2.get('original_id') != matched_orig_id:
+                    continue
+                t1s = _project_point_to_line_param(p1, wa2, wdir2)
+                t2s = _project_point_to_line_param(p2, wa2, wdir2)
+                if clamp_to_wall_segment:
+                    t1s = _clamp(t1s, 0.0, wlen2)
+                    t2s = _clamp(t2s, 0.0, wlen2)
+                t0s, t3s = (t1s, t2s) if t1s <= t2s else (t2s, t1s)
+                if (t3s - t0s) < float(min_segment_span):
+                    continue
+                per_wall_cuts.setdefault(wid2, []).append(
+                    (float(t0s), float(t3s), s, wa2 + t1s*wdir2, wa2 + t2s*wdir2, meta))
+                print(f"  BROADCAST cut to sibling wall {wid2} "
+                      f"(orig {matched_orig_id}), span={t3s-t0s:.3f}m")
+
     # --- Split walls by cut intervals ---
     new_walls: List[Dict[str, Any]] = []
     split_counter = 0
@@ -991,7 +1125,7 @@ def snap_segments_and_cut_walls(
 
     def _make_wall_like(original: Dict[str, Any], a: np.ndarray, b: np.ndarray, parent_wid: Any) -> Dict[str, Any]:
         nonlocal split_counter
-        w2 = dict(original)
+        w2 = copy.deepcopy(original)
         w2[endpoints_key] = (a.tolist(), b.tolist())
         w2["parent_wall_id"] = parent_wid
         if create_split_wall_ids:
@@ -1195,13 +1329,13 @@ def ransac_line_fitting(x, y, max_iterations, threshold, min_inliers, angle_thre
         # Split walls iwhose inlier points are seperarated by a gap > 15 cm
         # along the line direction so that we get two segments.
         
-        models = apply_gap_detection(models, xy_matrix, gap_treshold=2.1)
+        models = apply_gap_detection(models, xy_matrix, gap_threshold=0.30) # Default: 0.30
 
         # Extend walls to intersection point.
         models = extend_wall_to_intersection(models, max_extension=0.5)
 
         # Join co-linear walls that are close to each other, and have endpoints that are close to each other. This should help with holes in the wall segments.
-        models = bridge_collinear_walls(models, separation_threshold=0.50)
+        models = bridge_collinear_walls(models, separation_threshold=0.50, lateral_threshold=0.20, angle_threshold=0.5) # Default: 0.5, 0.20, 0.5)
 
     return models, parallel_pairs, parallel_groups 
  
@@ -1317,6 +1451,74 @@ def plot(wall_points, walls, centroid, door_points=None, doors=None, window_poin
     plt.tight_layout()
     plt.show()
 
+# JSON Utility
+
+Number = Union[int, float]
+PointLike = Union[Sequence[Number], Tuple[Number, Number]]
+
+
+import json
+from pathlib import Path
+from typing import Any, Dict, List, Sequence, Tuple, Union
+
+Number = Union[int, float]
+PointLike = Union[Sequence[Number], Tuple[Number, Number]]
+
+
+def _xy(p: PointLike, ndigits: int = 3) -> List[float]:
+    return [round(float(p[0]), ndigits), round(float(p[1]), ndigits)]
+
+
+def save_to_json(
+    out_path: Union[str, Path],
+    *,
+    walls: List[Dict[str, Any]],
+    doors: List[Dict[str, Any]],
+    windows: List[Dict[str, Any]],
+    unit: str = "m",
+    endpoints_key: str = "endpoints",
+    ndigits: int = 3,
+) -> Dict[str, Any]:
+    """
+    Minimal JSON export with:
+      - reindexed ids per category: 0..N-1
+      - endpoints rounded to 3 decimals (floats)
+      - length computed via line_length(endpoint1, endpoint2)
+    """
+    def pack(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        packed: List[Dict[str, Any]] = []
+        for it in items:
+            if endpoints_key not in it:
+                continue
+
+            p_raw, q_raw = it[endpoints_key]          # original numeric endpoints for length
+            p = _xy(p_raw, ndigits)
+            q = _xy(q_raw, ndigits)
+
+            packed.append({
+                "endpoints": [p, q],
+                "length": round(float(line_length(p_raw, q_raw)), ndigits),  # computed from originals
+            })
+
+        for i, obj in enumerate(packed):
+            obj["id"] = i
+        return packed
+
+    data = {
+        "unit": unit,
+        "elements": {
+            "walls": pack(walls),
+            "doors": pack(doors),
+            "windows": pack(windows),
+        },
+    }
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    return data
+
 # Read x,y from CSV
 def load_points(csv_path: str):
     """Load points from a CSV file. Expects columns named x,y,z (case-insensitive)."""
@@ -1340,12 +1542,12 @@ def main():
     vx, vy = load_points(window_csv)
 
     # Apply RANSAC line fitting to points 
-    walls, parallel_pairs, parallel_groups = ransac_line_fitting(
+    walls, _, _ = ransac_line_fitting(
                         wx, # Wall x coordinates
                         wy, # Wall y coordinates
                         max_iterations=500,
                         threshold=0.025,
-                        min_inliers=1500,
+                        min_inliers=1850,
                         angle_threshold=5.0,
                         wall_post_processing=True,
                         door_post_processing = False
@@ -1366,10 +1568,14 @@ def main():
                         vy,
                         max_iterations=2000,
                         threshold=0.05,
-                        min_inliers=100,
+                        min_inliers=250,
                         angle_threshold=5.0,
                         wall_post_processing=False,
                         door_post_processing=True)
+    print(f"[1] windows after RANSAC: {len(windows)}")
+    for w in windows:
+        p1,p2 = w['endpoints']
+        print(f"     id={w['wall_id']} inliers={w['num_inliers']} ep=({p1[0]:.2f},{p1[1]:.3f})→({p2[0]:.2f},{p2[1]:.3f})")
 
     # Keep only the door which lies closest to a wall.
     doors = filter_door_segments_keep_frame_opening(
@@ -1377,15 +1583,25 @@ def main():
                         walls,
                         threshold=0.10,           
                         use_angle=True,
-                        angle_threshold_deg=15.0,
+                        angle_threshold_deg=20.0,
                         angle_weight=0.10,
-                        max_endpoint_wall_distance=0.02
+                        max_endpoint_wall_distance=0.05
                     )
+
+    # Filter window segments
+    windows = filter_window_segments(
+                        windows,
+                        walls,
+                        max_midpoint_wall_distance=0.30,
+                        angle_threshold_deg=20.0,
+                        min_length=0.20,
+                        )
+    print(f"[STAGE] after filter_window_segments: {len(windows)}")
     
     new_walls, snapped_doors = snap_segments_and_cut_walls(
     segments=doors,
     walls=walls,
-    threshold=0.20,           # tune
+    threshold=0.15,           # tune
     min_segment_span=0.20,    # doors typically > 0.3m
     )
     
@@ -1395,6 +1611,10 @@ def main():
         threshold=0.30,
         min_segment_span=0.20,
     )
+    print(f"[2] snapped_windows: {len(snapped_windows)}")
+    for w in snapped_windows:
+        p1,p2 = w['endpoints']
+        print(f"     matched_wall={w.get('matched_wall_id','?')} ep=({p1[0]:.2f},{p1[1]:.3f})→({p2[0]:.2f},{p2[1]:.3f})")
 
     walls = new_walls
     #walls, _, pg = detect_parallel_lines(walls, 0.15, 0.5)
@@ -1406,6 +1626,16 @@ def main():
     walls = relabel_walls(walls)
 
     centroid = calculate_centroid(wx, wy)
+
+    # Save to JSON
+    save_to_json(
+        out_path="output/floorplan.json",
+        walls=walls,                  # or final_walls
+        doors=snapped_doors,          # or final_doors
+        windows=snapped_windows,      # or final_windows
+        unit="m",
+    )
+
     # DEBUGGING
     plot(
         np.column_stack((wx, wy)), 
@@ -1415,6 +1645,8 @@ def main():
         doors=doors, 
         windows=windows, 
         window_points=np.column_stack((vx, vy)))
+
+    
 
 if __name__ == "__main__":
     main()
