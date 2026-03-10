@@ -1,6 +1,7 @@
 import copy
 import math
 import json
+import os
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -1530,48 +1531,46 @@ def load_points(csv_path: str):
         raise ValueError(f"{csv_path} must contain 'x' and 'y' columns. Found: {list(df.columns)}")
     return df[x_col].to_numpy(), df[y_col].to_numpy()
 
-def main():
-    # CSV Paths
-    wall_csv   = "/home/hugni/PC_Processor/PC_PostProcessor/CSV_Predictions/pred_wall_coords_cloud0.csv"
-    door_csv   = "/home/hugni/PC_Processor/PC_PostProcessor/CSV_Predictions/pred_door_coords_cloud0.csv"
-    window_csv = "/home/hugni/PC_Processor/PC_PostProcessor/CSV_Predictions/pred_window_coords_cloud0.csv"
-
-    # Step 1: Load wall data.
+def process_room(wall_csv: str, door_csv: str, window_csv: str, out_json: str, show_plot: bool = False):
+    """
+    Run the full floor plan generation pipeline on one set of wall/door/window CSVs.
+    Saves the result to out_json.
+    """
+    # Step 1: Load point data
     wx, wy = load_points(wall_csv)
     dx, dy = load_points(door_csv)
     vx, vy = load_points(window_csv)
 
     # Apply RANSAC line fitting to points 
     walls, _, _ = ransac_line_fitting(
-                        wx, # Wall x coordinates
-                        wy, # Wall y coordinates
+                        wx, wy,
                         max_iterations=500,
                         threshold=0.025,
                         min_inliers=1850,
                         angle_threshold=5.0,
                         wall_post_processing=True,
-                        door_post_processing = False
+                        door_post_processing=False,
                         )
 
     doors, _, _ = ransac_line_fitting(
-                        dx,
-                        dy,
+                        dx, dy,
                         max_iterations=2000,
                         threshold=0.04,
                         min_inliers=180,
                         angle_threshold=5.0,
                         wall_post_processing=False,
-                        door_post_processing=True)
+                        door_post_processing=True,
+                        )
     
     windows, _, _ = ransac_line_fitting(
-                        vx,
-                        vy,
+                        vx, vy,
                         max_iterations=2000,
                         threshold=0.05,
                         min_inliers=250,
                         angle_threshold=5.0,
                         wall_post_processing=False,
-                        door_post_processing=True)
+                        door_post_processing=True,
+                        )
     print(f"[1] windows after RANSAC: {len(windows)}")
     for w in windows:
         p1,p2 = w['endpoints']
@@ -1599,10 +1598,10 @@ def main():
     print(f"[STAGE] after filter_window_segments: {len(windows)}")
     
     new_walls, snapped_doors = snap_segments_and_cut_walls(
-    segments=doors,
-    walls=walls,
-    threshold=0.15,           # tune
-    min_segment_span=0.20,    # doors typically > 0.3m
+        segments=doors,
+        walls=walls,
+        threshold=0.15,
+        min_segment_span=0.20,
     )
     
     new_walls, snapped_windows = snap_segments_and_cut_walls(
@@ -1617,8 +1616,6 @@ def main():
         print(f"     matched_wall={w.get('matched_wall_id','?')} ep=({p1[0]:.2f},{p1[1]:.3f})→({p2[0]:.2f},{p2[1]:.3f})")
 
     walls = new_walls
-    #walls, _, pg = detect_parallel_lines(walls, 0.15, 0.5)
-    #walls = remove_parallel_walls(walls, pg)
     doors = snapped_doors
     windows = snapped_windows
 
@@ -1629,24 +1626,159 @@ def main():
 
     # Save to JSON
     save_to_json(
-        out_path="output/floorplan.json",
-        walls=walls,                  # or final_walls
-        doors=snapped_doors,          # or final_doors
-        windows=snapped_windows,      # or final_windows
+        out_path=out_json,
+        walls=walls,
+        doors=doors,
+        windows=windows,
         unit="m",
     )
+    print(f"Saved floor plan → {out_json}")
 
-    # DEBUGGING
-    plot(
-        np.column_stack((wx, wy)), 
-        walls, 
-        centroid,
-        door_points=np.column_stack((dx, dy)),
-        doors=doors, 
-        windows=windows, 
-        window_points=np.column_stack((vx, vy)))
+    # Plot
+    if show_plot:
+        plot(
+            np.column_stack((wx, wy)), 
+            walls, 
+            centroid,
+            door_points=np.column_stack((dx, dy)),
+            doors=doors, 
+            windows=windows, 
+            window_points=np.column_stack((vx, vy)))
 
-    
+
+def discover_rooms(input_dir: str, source: str) -> list:
+    """
+    Scan input_dir for groups of wall/door/window CSVs and return a list of
+    (room_name, wall_csv, door_csv, window_csv) tuples.
+
+    CSV naming conventions:
+      GT:   <room>_gt_wall_coords.csv,   <room>_gt_door_coords.csv,   <room>_gt_window_coords.csv
+      Pred: <room>_wall_coords.csv,      <room>_door_coords.csv,      <room>_window_coords.csv
+    """
+    import glob
+
+    if source == "gt":
+        wall_suffix = "_gt_wall_coords.csv"
+    else:
+        wall_suffix = "_wall_coords.csv"
+
+    wall_files = sorted(glob.glob(os.path.join(input_dir, f"*{wall_suffix}")))
+
+    # In pred mode, exclude files that match the GT naming pattern
+    if source == "pred":
+        wall_files = [f for f in wall_files if "_gt_wall_coords.csv" not in f]
+
+    rooms = []
+
+    for wf in wall_files:
+        room_name = os.path.basename(wf).replace(wall_suffix, "")
+
+        if source == "gt":
+            door_csv   = os.path.join(input_dir, f"{room_name}_gt_door_coords.csv")
+            window_csv = os.path.join(input_dir, f"{room_name}_gt_window_coords.csv")
+        else:
+            door_csv   = os.path.join(input_dir, f"{room_name}_door_coords.csv")
+            window_csv = os.path.join(input_dir, f"{room_name}_window_coords.csv")
+
+        if not os.path.isfile(door_csv):
+            print(f"WARNING: missing door CSV for {room_name}, skipping")
+            continue
+        if not os.path.isfile(window_csv):
+            print(f"WARNING: missing window CSV for {room_name}, skipping")
+            continue
+
+        rooms.append((room_name, wf, door_csv, window_csv))
+
+    return rooms
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Generate floor plans from wall/door/window CSVs.")
+
+    parser.add_argument("input", nargs="?", default=None,
+                        help="Input directory containing CSVs (required for --batch), "
+                             "or unused in single-file mode.")
+
+    # Source flag (mutually exclusive)
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument("--gt", action="store_true",
+                              help="Input CSVs are ground-truth (expects *_gt_wall_coords.csv naming)")
+    source_group.add_argument("--pred", action="store_true",
+                              help="Input CSVs are predictions (expects *_wall_coords.csv naming)")
+
+    parser.add_argument("--batch", action="store_true",
+                        help="Process all rooms found in the input directory")
+    parser.add_argument("--output_dir", default="./output",
+                        help="Directory for output JSON files (default: ./output)")
+    parser.add_argument("--plot", action="store_true",
+                        help="Show debug plot for each room")
+
+    # Single-file mode (backwards compatibility)
+    parser.add_argument("--wall_csv", default=None, help="Path to wall CSV (single-file mode)")
+    parser.add_argument("--door_csv", default=None, help="Path to door CSV (single-file mode)")
+    parser.add_argument("--window_csv", default=None, help="Path to window CSV (single-file mode)")
+    parser.add_argument("--room_name", default=None, help="Room name for output file (single-file mode)")
+
+    args = parser.parse_args()
+
+    source = "gt" if args.gt else "pred"
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    if args.batch:
+        # ---- Batch mode ----
+        if args.input is None:
+            parser.error("--batch requires an input directory")
+
+        rooms = discover_rooms(args.input, source)
+        if not rooms:
+            print(f"No matching CSV groups found in {args.input} for --{source}")
+            return
+
+        print(f"Found {len(rooms)} room(s) in {args.input} (source: {source})\n")
+        print("-" * 60)
+
+        for i, (room_name, wall_csv, door_csv, window_csv) in enumerate(rooms, 1):
+            print(f"\n[{i}/{len(rooms)}] Processing: {room_name}")
+            out_json = os.path.join(args.output_dir, f"{room_name}_floorplan_{source}.json")
+
+            try:
+                process_room(wall_csv, door_csv, window_csv, out_json, show_plot=args.plot)
+            except Exception as e:
+                print(f"  ERROR processing {room_name}: {e}")
+                continue
+
+        print("\n" + "-" * 60)
+        print(f"Done. {len(rooms)} floor plan(s) saved to {args.output_dir}/")
+
+    else:
+        # ---- Single-file mode ----
+        if args.wall_csv and args.door_csv and args.window_csv:
+            wall_csv = args.wall_csv
+            door_csv = args.door_csv
+            window_csv = args.window_csv
+            room_name = args.room_name or Path(wall_csv).stem.replace("_gt_wall_coords", "").replace("_wall_coords", "")
+        elif args.input and args.room_name:
+            # Derive CSV paths from input dir + room name
+            d = args.input
+            if source == "gt":
+                wall_csv   = os.path.join(d, f"{args.room_name}_gt_wall_coords.csv")
+                door_csv   = os.path.join(d, f"{args.room_name}_gt_door_coords.csv")
+                window_csv = os.path.join(d, f"{args.room_name}_gt_window_coords.csv")
+            else:
+                wall_csv   = os.path.join(d, f"{args.room_name}_wall_coords.csv")
+                door_csv   = os.path.join(d, f"{args.room_name}_door_coords.csv")
+                window_csv = os.path.join(d, f"{args.room_name}_window_coords.csv")
+            room_name = args.room_name
+        else:
+            parser.error("Single-file mode requires either --wall_csv/--door_csv/--window_csv, "
+                         "or input directory + --room_name")
+            return
+
+        out_json = os.path.join(args.output_dir, f"{room_name}_floorplan_{source}.json")
+        process_room(wall_csv, door_csv, window_csv, out_json, show_plot=args.plot)
+
 
 if __name__ == "__main__":
     main()

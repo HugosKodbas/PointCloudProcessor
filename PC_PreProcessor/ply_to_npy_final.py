@@ -140,6 +140,51 @@ def dbscan_keep_largest_clusters(xyz: np.ndarray, eps: float, min_points: int, t
     return keep_mask, labels, kept.tolist()
 
 
+def plot_alignment(xyz_before, xyz_after, colors=None, max_points=200_000):
+    """
+    Side-by-side top-down XY scatter plot of the point cloud
+    before and after alignment + shift.
+    """
+    import matplotlib.pyplot as plt
+
+    rng = np.random.default_rng(0)
+    n = min(max_points, len(xyz_before))
+    idx = rng.choice(len(xyz_before), n, replace=False)
+
+    # Build color array
+    if colors is not None:
+        c = np.asarray(colors[idx], dtype=np.float32)
+        if c.max() > 1.0:
+            c = c / 255.0
+        c = c.clip(0, 1)
+    else:
+        c = "gray"
+
+    fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(16, 7))
+
+    # ---- Before ----
+    ax_l.scatter(xyz_before[idx, 0], xyz_before[idx, 1], c=c, s=0.15, alpha=0.4)
+    ax_l.axhline(0, color="red", lw=0.8, ls="--", alpha=0.6)
+    ax_l.axvline(0, color="red", lw=0.8, ls="--", alpha=0.6)
+    ax_l.set_aspect("equal")
+    ax_l.set_title("Before alignment (filtered)")
+    ax_l.set_xlabel("X (m)")
+    ax_l.set_ylabel("Y (m)")
+
+    # ---- After ----
+    ax_r.scatter(xyz_after[idx, 0], xyz_after[idx, 1], c=c, s=0.15, alpha=0.4)
+    ax_r.axhline(0, color="red", lw=0.8, ls="-", alpha=0.7, label="X = 0 / Y = 0")
+    ax_r.axvline(0, color="red", lw=0.8, ls="-", alpha=0.7)
+    ax_r.set_aspect("equal")
+    ax_r.set_title("After alignment + XY shift")
+    ax_r.set_xlabel("X (m)")
+    ax_r.set_ylabel("Y (m)")
+    ax_r.legend(loc="upper right")
+
+    plt.tight_layout()
+    plt.show()
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -159,6 +204,9 @@ def main():
     parser.add_argument("--dbscan_eps", type=float, default=0.25, help="DBSCAN eps in meters (cluster radius)")
     parser.add_argument("--dbscan_min_points", type=int, default=30, help="DBSCAN min_points")
     parser.add_argument("--dbscan_keep_topk", type=int, default=1, help="Keep top-K largest clusters (1 keeps main blob)")
+
+    # Plotting
+    parser.add_argument("--plot", action="store_true", help="Show before/after alignment plot")
 
     args = parser.parse_args()
 
@@ -258,6 +306,9 @@ def main():
 
         print(f"DBSCAN kept clusters {kept_ids} -> {xyz_filtered.shape[0]}/{before} points ({100*xyz_filtered.shape[0]/before:.2f}%)")
 
+    # ---- Snapshot for plotting (before alignment) ----
+    xyz_before_align = xyz_filtered.copy()
+
     # ---- Align XY (yaw) on filtered points ----
     if args.align_xy and xyz_filtered.shape[0] > 10:
         print("Aligning point cloud to dominant wall direction (Manhattan histogram)...")
@@ -292,6 +343,10 @@ def main():
     xyz_filtered[:, 0] -= xy_min[0]
     xyz_filtered[:, 1] -= xy_min[1]
     print(f"Shifted filtered cloud so min XY = (0, 0). Translation: ({-xy_min[0]:.3f}, {-xy_min[1]:.3f})m")
+
+    # ---- Plot before/after alignment ----
+    if args.plot:
+        plot_alignment(xyz_before_align, xyz_filtered, colors_filtered)
 
 
     # ---- Convert colors to 0..255 ----
