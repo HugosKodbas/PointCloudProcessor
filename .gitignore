@@ -1,3 +1,32 @@
-./PC_PostProcessor/output
-./PC_PostProcessor/pred_coords
-./PC_PostProcessor/gt_coords
+# Generated folders
+PC_PostProcessor/output/
+PC_PostProcessor/pred_coords/
+PC_PostProcessor/gt_coords/
+PC_PostProcessor/Configura_Floorplans/
+PC_PostProcessor/Custom_Scans_2/
+PC_PostProcessor/S3DIS_Plans/
+PC_PreProcessor/npy_files/
+
+# Raw scan files
+PC_PreProcessor/ply_files/
+
+# Data files
+*.csv
+*.json
+*.png
+*.jpg
+*.jpeg
+*.npy
+*.npz
+*.ply
+*.obj
+
+# Model/checkpoint/log files
+*.pth
+*.pt
+*.ckpt
+*.log
+
+# Python cache
+__pycache__/
+*.pyc

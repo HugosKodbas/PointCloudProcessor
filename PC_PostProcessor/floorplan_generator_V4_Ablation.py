@@ -1019,8 +1019,14 @@ def snap_segments_and_cut_walls(
         mid = 0.5 * (p1 + p2)
         sdir = _seg_dir(p1, p2)
 
+        # If a filter step already resolved the best wall (e.g. filter_window_segments
+        # uses segment distance rather than infinite-line distance), honour that choice
+        # so split pieces of the same original wall don't tie on inf-line score.
+        pre_matched_wid = s.get("matched_wall_id")  # set by filter_window/door_segments; uses seg dist, not inf-line
         best = None  # (score, dist_mid, ang_rad, ang_deg, wi, wid, wa, wb, wdir, wlen, wall_dict)
         for wi, wid, wa, wb, wdir, wlen, wdict in wall_data:
+            if pre_matched_wid is not None and wid != pre_matched_wid:
+                continue  # skip walls that don't match the pre-resolved choice
             # Distance to the infinite-line model, so that we can still calculate the midpoint of lines that have been split by gaps.
             a_coef, b_coef, c_coef = wdict['model']   # already stored in the wall dict
             dist_mid = float(abs(a_coef * mid[0] + b_coef * mid[1] + c_coef))
@@ -1219,7 +1225,7 @@ def ransac_line_fitting(x, y, max_iterations, threshold, min_inliers, angle_thre
 
     # Seed the random generator for reproducibility, but also to ensure different samples across different models.
     
-    SEED = random.Random(42)
+    SEED = random.Random(43)
 
     # Find ALL models.
     while len(available_points) >= min_inliers:
@@ -1333,10 +1339,9 @@ def ransac_line_fitting(x, y, max_iterations, threshold, min_inliers, angle_thre
         # Now detect gaps.
         # Split walls iwhose inlier points are seperarated by a gap > 15 cm
         # along the line direction so that we get two segments.
-        
         models = apply_gap_detection(models, xy_matrix, gap_threshold=0.30) # Default: 0.30
 
-        # Extend walls to intersection point.
+        # Extend walls to intersection point. (corner reconstruction)
         models = extend_wall_to_intersection(models, max_extension=1.0)
 
         # Join co-linear walls that are close to each other, and have endpoints that are close to each other. This should help with holes in the wall segments.
@@ -1375,7 +1380,7 @@ def relabel_walls(models):
     plt.tight_layout()
     plt.show() """
 
-def plot(wall_points, walls, centroid, door_points=None, doors=None, window_points=None, windows=None):
+def plot(wall_points, walls, centroid, door_points=None, doors=None, window_points=None, windows=None, save_path=None):
     """Utility to plot wall/door points + detected wall/door segments for debugging.
 
     Parameters
@@ -1390,30 +1395,32 @@ def plot(wall_points, walls, centroid, door_points=None, doors=None, window_poin
     if doors is None:
         doors = []
 
-    plt.figure(figsize=(8, 8))
+    # Two-panel layout: plot on the left, legend panel on the right
+    fig, (ax, ax_legend) = plt.subplots(1, 2, figsize=(14, 8),
+                                         gridspec_kw={"width_ratios": [3, 1]})
 
     # --- Points ---
     wall_points = np.asarray(wall_points)
-    plt.scatter(wall_points[:, 0], wall_points[:, 1],
-                s=1, alpha=0.35, label="Wall points", color="lightblue")
+    ax.scatter(wall_points[:, 0], wall_points[:, 1],
+               s=1, alpha=0.35, label="Wall points", color="lightblue")
 
     if door_points is not None:
         door_points = np.asarray(door_points)
         if door_points.size > 0:
-            plt.scatter(door_points[:, 0], door_points[:, 1],
-                        s=6, alpha=0.6, label="Door points", color="lightpink")
+            ax.scatter(door_points[:, 0], door_points[:, 1],
+                       s=6, alpha=0.6, label="Door points", color="lightpink")
 
     if window_points is not None:
         window_points = np.asarray(window_points)
         if window_points.size > 0:
-            plt.scatter(window_points[:, 0], window_points[:, 1],
-                        s=6, alpha=0.6, label="Window points", color="lightgreen")
+            ax.scatter(window_points[:, 0], window_points[:, 1],
+                       s=6, alpha=0.6, label="Window points", color="lightgreen")
 
     # --- Centroid ---
-    #plt.scatter(centroid[0], centroid[1], c="red", label="Room Centroid", zorder=20)
+    #ax.scatter(centroid[0], centroid[1], c="red", label="Room Centroid", zorder=20)
 
-    plt.axis("equal")
-    plt.title("Wall/Door/Window X/Y Points + Detected, Labeled Segments")
+    ax.set_aspect("equal")
+    ax.set_title("Wall/Door/Window X/Y Points + Detected, Labeled Segments")
 
     # --- Segments ---
     #wall_color = "#FFD400"   # bright, easy to see
@@ -1424,37 +1431,47 @@ def plot(wall_points, walls, centroid, door_points=None, doors=None, window_poin
     colors = plt.cm.tab10(np.linspace(0, 1, len(walls)))
     for i, wall in enumerate(walls):
         p1, p2 = wall["endpoints"]
-        plt.plot([p1[0], p2[0]], [p1[1], p2[1]],
-                 color=colors[i], linewidth=3,
-                 label=f"Wall {wall.get('wall_id','?')} (orig {wall.get('original_id','?')}) ({wall.get('num_inliers', 0)} pts)",
-                 zorder=10, linestyle=":")
+        length = line_length(p1, p2)
+        ax.plot([p1[0], p2[0]], [p1[1], p2[1]],
+                color=colors[i], linewidth=3,
+                label=f"Wall {wall.get('wall_id','?')} (orig {wall.get('original_id','?')}) ({wall.get('num_inliers', 0)} pts) Length: {length:.3f}m",
+                zorder=10, linestyle=":")
 
     # Doors
     for door in doors:
         p1, p2 = door["endpoints"]
-        plt.plot([p1[0], p2[0]], [p1[1], p2[1]],
-                 color=door_color, linewidth=3,
-                 label=f"Door {door.get('original_id', '?')} ({door.get('num_inliers', 0)} pts)",
-                 zorder=11, linestyle="-.")
-        
-    for window in windows:
-        p1, p2 = window["endpoints"]
-        plt.plot([p1[0], p2[0]], [p1[1], p2[1]],
-                color=window_color, linewidth=3,
-                label=f"Window {window.get('original_id', '?')} ({window.get('num_inliers', 0)} pts)",
+        length = line_length(p1, p2)
+        ax.plot([p1[0], p2[0]], [p1[1], p2[1]],
+                color=door_color, linewidth=3,
+                label=f"Door {door.get('original_id', '?')} ({door.get('num_inliers', 0)} pts) Length: {length:.3f}m",
                 zorder=11, linestyle="-.")
 
-    plt.xlabel("X (m)")
-    plt.ylabel("Y (m)")
+    for window in windows:
+        p1, p2 = window["endpoints"]
+        length = line_length(p1, p2)
+        ax.plot([p1[0], p2[0]], [p1[1], p2[1]],
+                color=window_color, linewidth=3,
+                label=f"Window {window.get('original_id', '?')} ({window.get('num_inliers', 0)} pts) Length: {length:.3f}m",
+                zorder=11, linestyle="-.")
 
-    # Avoid a huge legend if you have many segments
-    handles, labels = plt.gca().get_legend_handles_labels()
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+    ax.grid(True, alpha=0.2, linestyle="--")
+
+    # --- Legend panel ---
+    handles, labels = ax.get_legend_handles_labels()
     dedup = dict(zip(labels, handles))  # keeps last occurrence
-    plt.legend(dedup.values(), dedup.keys(), loc="best", fontsize=9)
+    ax_legend.legend(dedup.values(), dedup.keys(), loc="center", fontsize=9,
+                     frameon=True, borderpad=1)
+    ax_legend.axis("off")
 
-    plt.grid(True, alpha=0.2, linestyle="--")
     plt.tight_layout()
-    plt.show()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"Saved plot → {save_path}")
+    else:
+        plt.show()
 
 # JSON Utility
 
@@ -1535,7 +1552,7 @@ def load_points(csv_path: str):
         raise ValueError(f"{csv_path} must contain 'x' and 'y' columns. Found: {list(df.columns)}")
     return df[x_col].to_numpy(), df[y_col].to_numpy()
 
-def process_room(wall_csv: str, door_csv: str, window_csv: str, out_json: str, show_plot: bool = False):
+def process_room(wall_csv: str, door_csv: str, window_csv: str, out_json: str, show_plot: bool = False, out_plot: str = None):
     """
     Run the full floor plan generation pipeline on one set of wall/door/window CSVs.
     Saves the result to out_json.
@@ -1550,32 +1567,32 @@ def process_room(wall_csv: str, door_csv: str, window_csv: str, out_json: str, s
                         wx, wy,
                         max_iterations=500,
                         threshold=0.025,
-                        min_inliers=2500,
+                        min_inliers=1750,
                         angle_threshold=5.0,
                         wall_post_processing=True,
                         door_post_processing=False,
                         )
 
-    doors, _, _ = ransac_line_fitting(
+    """ doors, _, _ = ransac_line_fitting(
                         dx, dy,
                         max_iterations=2000,
                         threshold=0.04,
                         min_inliers=150,  # lowered from 180 — tolerates thin door-frame scans
                         angle_threshold=5.0,
                         wall_post_processing=False,
-                        door_post_processing=True,
+                        door_post_processing=True
                         )
     
     windows_raw, _, _ = ransac_line_fitting(
                         vx, vy,
                         max_iterations=2000,
                         threshold=0.05,
-                        min_inliers=200,  # lowered from 250 — catches smaller window panes
+                        min_inliers=175,  # lowered from 250 — catches smaller window panes
                         angle_threshold=5.0,
                         wall_post_processing=False,
-                        door_post_processing=True,
+                        door_post_processing=True
                         )
-    print(f"[1] windows_raw after RANSAC: {len(windows_raw)}")
+    print(f"[1] windows_raw after RANSAC: {len(windows_raw)}") """
 
     # ── corrected parallel-duplicate removal ──────────────────────────────────
     # Re-run with relaxed angle threshold (3.0 deg vs the hardcoded 0.5 deg inside
@@ -1599,7 +1616,7 @@ def process_room(wall_csv: str, door_csv: str, window_csv: str, out_json: str, s
                         )
 
     import copy as _copy
-    def _extend_walls_using_windows(walls, windows):
+    def _extend_walls_using_windows(walls, windows, max_extension_factor=2.0):
         walls = [_copy.deepcopy(w) for w in walls]
         for win in windows:
             wid  = win.get('matched_wall_id')
@@ -1617,6 +1634,11 @@ def process_room(wall_csv: str, door_csv: str, window_csv: str, out_json: str, s
             new_p1, new_p2 = wp1.copy(), wp2.copy()
             if tmin < 0:      new_p1 = wp1 + tmin * wdir
             if tmax > wlen:   new_p2 = wp1 + tmax * wdir
+            # Guard: don't extend beyond max_extension_factor * original wall length.
+            # Prevents a misclassified full-wall window segment from stretching a short
+            # wall piece to an unreasonable size (e.g. a 2.9 m wall → 16 m).
+            if line_length(new_p1, new_p2) > wlen * max_extension_factor:
+                continue
             wall['endpoints'] = (new_p1, new_p2)
         return walls
 
@@ -1643,19 +1665,31 @@ def process_room(wall_csv: str, door_csv: str, window_csv: str, out_json: str, s
                         )
     print(f"[STAGE] after filter_window_segments: {len(windows)}")
 
-    # Windows snapped first (against intact walls) so the window opening is cut
-    # before the door snap further splits those same walls.
-    new_walls, snapped_windows = snap_segments_and_cut_walls(
-        segments=windows,
+    # Doors snapped first (against intact extended walls) → correct full door span.
+    new_walls, snapped_doors = snap_segments_and_cut_walls(
+        segments=doors,
         walls=walls,
-        threshold=0.20,       # window inf-line dist is 0.04-0.15 m; 0.20 gives safe margin
+        threshold=0.15,
         min_segment_span=0.20,
     )
 
-    new_walls, snapped_doors = snap_segments_and_cut_walls(
-        segments=doors,
+    # Re-extend door-split wall pieces using window evidence. The door snap splits
+    # the left wall at the door frame boundaries; the upper piece starts at the top
+    # of the door frame (y≈2.11) but the window begins lower (y≈1.44). Without this
+    # step the window snap clamps to the piece extent and loses the lower portion.
+    windows_for_ext2 = filter_window_segments(
+                        windows_raw,
+                        new_walls,
+                        max_midpoint_wall_distance=0.20,
+                        angle_threshold_deg=10.0,
+                        min_length=0.20,
+                        )
+    new_walls = _extend_walls_using_windows(new_walls, windows_for_ext2)
+
+    new_walls, snapped_windows = snap_segments_and_cut_walls(
+        segments=windows_for_ext2,  # already filtered & pre-matched above
         walls=new_walls,
-        threshold=0.15,
+        threshold=0.20,
         min_segment_span=0.20,
     )
 
@@ -1692,7 +1726,8 @@ def process_room(wall_csv: str, door_csv: str, window_csv: str, out_json: str, s
             door_points=np.column_stack((dx, dy)),
             doors=doors, 
             windows=windows, 
-            window_points=np.column_stack((vx, vy)))
+            window_points=np.column_stack((vx, vy)),
+            save_path=out_plot)
 
 
 def discover_rooms(input_dir: str, source: str) -> list:
@@ -1791,9 +1826,10 @@ def main():
         for i, (room_name, wall_csv, door_csv, window_csv) in enumerate(rooms, 1):
             print(f"\n[{i}/{len(rooms)}] Processing: {room_name}")
             out_json = os.path.join(args.output_dir, f"{room_name}_floorplan_{source}.json")
+            out_plot = os.path.join(args.output_dir, f"{room_name}_plot.png") if args.plot else None
 
             try:
-                process_room(wall_csv, door_csv, window_csv, out_json, show_plot=args.plot)
+                process_room(wall_csv, door_csv, window_csv, out_json, show_plot=args.plot, out_plot=out_plot)
             except Exception as e:
                 print(f"  ERROR processing {room_name}: {e}")
                 continue
@@ -1826,7 +1862,8 @@ def main():
             return
 
         out_json = os.path.join(args.output_dir, f"{room_name}_floorplan_{source}.json")
-        process_room(wall_csv, door_csv, window_csv, out_json, show_plot=args.plot)
+        out_plot = os.path.join(args.output_dir, f"{room_name}_plot.png") if args.plot else None
+        process_room(wall_csv, door_csv, window_csv, out_json, show_plot=args.plot, out_plot=out_plot)
 
 
 if __name__ == "__main__":

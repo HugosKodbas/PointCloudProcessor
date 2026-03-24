@@ -37,7 +37,12 @@ python ply_to_npy_db.py <GOOGLE_DRIVE_LINK> <OUTPUT_NAME> [OPTIONS]
 ## Recommended command
 
 ```
-python ply_to_npy_db.py <GOOGLE_DRIVE_LINK> Office --make_z_up --downsample_voxel 0.02 --filter_ror --dbscan --dbscan_eps 0.25 --dbscan_min_points 30 --align_xy --plot
+python ply_to_npy_final.py <GOOGLE_DRIVE_LINK> <ROOM_NAME> --make_z_up --downsample_voxel 0.02 --filter_ror --dbscan --dbscan_eps 0.25 --dbscan_min_points 30 --align_xy --plot
+```
+
+## For scans acquired with PolyCam
+```
+python ply_to_npy_final.py <GOOGLE_DRIVE_LINK> <ROOM_NAME> --downsample_voxel 0.02 --filter_ror --dbscan --dbscan_eps 0.25 --dbscan_min_points 30 --align_xy --plot
 ```
 
 **Note:** The Google Drive file must be shared (Anyone with the link).
@@ -94,6 +99,9 @@ Output:
 ```
 # By room name (auto-discovers the 3 CSVs in the directory)
 python floorplan_generator_V3.py ./gt_coords --gt --room_name Area_5_hallway_8
+
+# For custom scans
+python floorplan_generator_V4.py ./Custom_Scans --pred --room_name Area_5_<ROOM_NAME> [--plot]
 
 # By explicit CSV paths
 python floorplan_generator_V3.py --pred --wall_csv wall.csv --door_csv door.csv --window_csv window.csv --room_name my_room
